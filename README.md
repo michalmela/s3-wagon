@@ -13,7 +13,7 @@ A drop-in replacement for https://github.com/s3-wagon-private/s3-wagon-private b
 In `project.clj`:
 
 ```clj
-:plugins [[michalmela/s3-wagon "1.0.0"]]
+:plugins [[io.github.michalmela/s3-wagon "1.0.0"]]
 
 ;;; option 1: use default credentials provider
 ; cf. https://docs.aws.amazon.com/sdk-for-java/latest/developer-guide/credentials.html#credentials-chain
