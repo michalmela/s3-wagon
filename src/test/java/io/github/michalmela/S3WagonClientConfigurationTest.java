@@ -1,0 +1,135 @@
+package io.github.michalmela;
+
+import org.apache.maven.wagon.authentication.AuthenticationInfo;
+import org.apache.maven.wagon.proxy.ProxyInfo;
+import org.apache.maven.wagon.repository.Repository;
+import org.junit.jupiter.api.Test;
+
+import java.net.URI;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
+
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+/**
+ * These build a real S3 client rather than the in-memory one. Building a client makes no network
+ * calls, so this stays hermetic while still proving the wagon hands the SDK something usable.
+ */
+class S3WagonClientConfigurationTest {
+
+    /**
+     * The endpoint was built as host + ":" + port with no scheme, which URI reads as a scheme of
+     * "proxy.example.com" with a null host - so the SDK was handed a proxy it could not use and
+     * every request quietly bypassed it.
+     */
+    @Test
+    void buildsAUsableProxyEndpoint() {
+        ProxyInfo proxy = new ProxyInfo();
+        proxy.setHost("proxy.example.com");
+        proxy.setPort(8080);
+
+        URI endpoint = S3Wagon.proxyEndpoint(proxy);
+
+        assertEquals("http", endpoint.getScheme());
+        assertEquals("proxy.example.com", endpoint.getHost());
+        assertEquals(8080, endpoint.getPort());
+    }
+
+    @Test
+    void honoursAnHttpsProxy() {
+        ProxyInfo proxy = new ProxyInfo();
+        proxy.setHost("proxy.example.com");
+        proxy.setPort(8443);
+        proxy.setType("https");
+
+        assertEquals("https", S3Wagon.proxyEndpoint(proxy).getScheme());
+    }
+
+    /** Apache's proxy support is HTTP-only, so a SOCKS type cannot be passed through as a scheme. */
+    @Test
+    void fallsBackToHttpForProxyTypesApacheCannotUse() {
+        ProxyInfo proxy = new ProxyInfo();
+        proxy.setHost("proxy.example.com");
+        proxy.setPort(1080);
+        proxy.setType(ProxyInfo.PROXY_SOCKS5);
+
+        assertEquals("http", S3Wagon.proxyEndpoint(proxy).getScheme());
+    }
+
+    @Test
+    void splitsNonProxyHosts() {
+        ProxyInfo proxy = new ProxyInfo();
+        proxy.setNonProxyHosts("localhost|*.internal, 10.0.0.1");
+
+        assertEquals(new HashSet<>(Arrays.asList("localhost", "*.internal", "10.0.0.1")),
+                S3Wagon.nonProxyHosts(proxy));
+    }
+
+    @Test
+    void toleratesMissingNonProxyHosts() {
+        assertEquals(Collections.emptySet(), S3Wagon.nonProxyHosts(new ProxyInfo()));
+    }
+
+    @Test
+    void buildsAClientThroughAProxy() {
+        ProxyInfo proxy = new ProxyInfo();
+        proxy.setHost("proxy.example.com");
+        proxy.setPort(8080);
+        proxy.setUserName("proxy-user");
+        proxy.setPassword("proxy-password");
+        proxy.setNonProxyHosts("localhost");
+
+        S3Wagon wagon = new S3Wagon();
+        wagon.setRegion("eu-central-1");
+
+        assertDoesNotThrow(() -> {
+            wagon.connect(new Repository("test", "s3p://bucket/releases/"), proxy);
+            wagon.disconnect();
+        });
+    }
+
+    /** A ProxyInfo with nothing in it must not turn into a proxy at "http://null:0". */
+    @Test
+    void ignoresAnEmptyProxy() {
+        S3Wagon wagon = new S3Wagon();
+        wagon.setRegion("eu-central-1");
+
+        assertDoesNotThrow(() -> {
+            wagon.connect(new Repository("test", "s3p://bucket/releases/"), new ProxyInfo());
+            wagon.disconnect();
+        });
+    }
+
+    @Test
+    void buildsAClientWithStaticCredentials() {
+        AuthenticationInfo authentication = new AuthenticationInfo();
+        authentication.setUserName("AKIAEXAMPLE");
+        authentication.setPassword("secret");
+
+        S3Wagon wagon = new S3Wagon();
+        wagon.setRegion("eu-central-1");
+
+        assertDoesNotThrow(() -> {
+            wagon.connect(new Repository("test", "s3p://bucket/releases/"), authentication);
+            wagon.disconnect();
+        });
+    }
+
+    /** Blank credentials must fall through to the default provider chain, not be sent as empty. */
+    @Test
+    void ignoresBlankCredentials() {
+        AuthenticationInfo authentication = new AuthenticationInfo();
+        authentication.setUserName("");
+        authentication.setPassword("");
+
+        S3Wagon wagon = new S3Wagon();
+        wagon.setRegion("eu-central-1");
+
+        assertDoesNotThrow(() -> {
+            wagon.connect(new Repository("test", "s3p://bucket/releases/"), authentication);
+            wagon.disconnect();
+        });
+    }
+}

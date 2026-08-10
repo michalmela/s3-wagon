@@ -33,6 +33,9 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashSet;
+import java.util.Set;
 import java.util.function.Function;
 
 import static software.amazon.awssdk.utils.StringUtils.isNotBlank;
@@ -474,9 +477,10 @@ public final class S3Wagon extends AbstractWagon {
 
     private static SdkHttpClient awsHttpClient(ProxyInfo proxyInfo) {
         ApacheHttpClient.Builder httpClientBuilder = ApacheHttpClient.builder();
-        if (proxyInfo != null) {
+        if (proxyInfo != null && isNotBlank(proxyInfo.getHost())) {
             httpClientBuilder.proxyConfiguration(ProxyConfiguration.builder()
-                    .endpoint(URI.create(proxyInfo.getHost() + ":" + proxyInfo.getPort()))
+                    .endpoint(proxyEndpoint(proxyInfo))
+                    .nonProxyHosts(nonProxyHosts(proxyInfo))
                     .ntlmDomain(proxyInfo.getNtlmDomain())
                     .ntlmWorkstation(proxyInfo.getNtlmHost())
                     .username(proxyInfo.getUserName())
@@ -484,6 +488,34 @@ public final class S3Wagon extends AbstractWagon {
                     .build());
         }
         return httpClientBuilder.build();
+    }
+
+    /**
+     * The proxy endpoint needs a scheme: without one, {@link URI} reads "proxy.example.com:8080" as
+     * a scheme of "proxy.example.com" and leaves the host null, and the proxy is quietly ignored.
+     *
+     * <p>Apache's proxy support speaks HTTP, so a SOCKS proxy type cannot be honoured here and is
+     * treated as HTTP rather than producing a URI the SDK will reject.
+     */
+    static URI proxyEndpoint(ProxyInfo proxyInfo) {
+        String type = proxyInfo.getType();
+        String scheme = "https".equalsIgnoreCase(type) ? "https" : "http";
+        return URI.create(scheme + "://" + proxyInfo.getHost() + ":" + proxyInfo.getPort());
+    }
+
+    /** Wagon separates non-proxy hosts with '|'; the SDK wants them one by one. */
+    static Set<String> nonProxyHosts(ProxyInfo proxyInfo) {
+        String nonProxyHosts = proxyInfo.getNonProxyHosts();
+        if (!isNotBlank(nonProxyHosts)) {
+            return Collections.emptySet();
+        }
+        Set<String> hosts = new LinkedHashSet<>();
+        for (String host : nonProxyHosts.split("[|,]")) {
+            if (isNotBlank(host)) {
+                hosts.add(host.trim());
+            }
+        }
+        return hosts;
     }
 
     @Override
