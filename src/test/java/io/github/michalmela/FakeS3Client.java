@@ -327,6 +327,7 @@ final class FakeS3Client implements S3Client {
     private byte[] readFully(RequestBody body) {
         try (InputStream in = body.contentStreamProvider().newStream()) {
             ByteArrayOutputStream out = new ByteArrayOutputStream();
+            in.available();
             switch (readStyle) {
                 case SINGLE_BYTE:
                     int b;

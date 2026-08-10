@@ -85,6 +85,34 @@ class S3WagonMultipartTest {
         assertEquals("initiated,started,progress,completed", listener.sequence());
     }
 
+    /** The part stream has to stop exactly at the part boundary however the SDK reads it. */
+    @Test
+    void sendsCorrectPartsWhenReadOneByteAtATime() throws Exception {
+        byte[] payload = new byte[12 * 1024 * 1024];
+        new Random(3).nextBytes(payload);
+        FakeS3Client s3 = new FakeS3Client();
+        s3.readUploadsAs(FakeS3Client.ReadStyle.SINGLE_BYTE);
+        S3Wagon wagon = wagon(s3, "1048576", "5242880");
+
+        wagon.put(fileContaining(payload), RESOURCE);
+
+        assertEquals(3, s3.uploadPartRequests().size());
+        assertArrayEquals(payload, s3.objectContent(KEY));
+    }
+
+    @Test
+    void sendsCorrectPartsWhenReadIntoAnOffsetBuffer() throws Exception {
+        byte[] payload = new byte[12 * 1024 * 1024];
+        new Random(4).nextBytes(payload);
+        FakeS3Client s3 = new FakeS3Client();
+        s3.readUploadsAs(FakeS3Client.ReadStyle.OFFSET);
+        S3Wagon wagon = wagon(s3, "1048576", "5242880");
+
+        wagon.put(fileContaining(payload), RESOURCE);
+
+        assertArrayEquals(payload, s3.objectContent(KEY));
+    }
+
     @Test
     void abortsTheUploadWhenAPartFails() throws Exception {
         FakeS3Client s3 = new FakeS3Client();
