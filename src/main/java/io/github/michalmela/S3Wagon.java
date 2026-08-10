@@ -5,12 +5,14 @@ import org.apache.maven.wagon.ResourceDoesNotExistException;
 import org.apache.maven.wagon.TransferFailedException;
 import org.apache.maven.wagon.authentication.AuthenticationInfo;
 import org.apache.maven.wagon.authorization.AuthorizationException;
+import org.apache.maven.wagon.events.TransferEvent;
 import org.apache.maven.wagon.proxy.ProxyInfo;
 import org.apache.maven.wagon.resource.Resource;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.awscore.exception.AwsServiceException;
 import software.amazon.awssdk.core.ResponseInputStream;
+import software.amazon.awssdk.core.exception.SdkClientException;
 import software.amazon.awssdk.core.exception.SdkException;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.http.SdkHttpClient;
@@ -21,9 +23,14 @@ import software.amazon.awssdk.services.s3.S3ClientBuilder;
 import software.amazon.awssdk.services.s3.model.*;
 import software.amazon.awssdk.services.sso.auth.ExpiredTokenException;
 
+import java.io.BufferedInputStream;
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.FilterInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
+import java.util.Arrays;
 
 import static software.amazon.awssdk.utils.StringUtils.isNotBlank;
 
@@ -99,12 +106,12 @@ public final class S3Wagon extends AbstractWagon {
                     .key(key(resourceName))
                     .bucket(bucket)
                     .build();
-            this.fireGetStarted(resource, destination);
             try (ResponseInputStream<GetObjectResponse> is = s3.getObject(objectRequest)) {
+                // getTransfer fires started/progress/completed itself.
                 this.getTransfer(resource, destination, is);
             }
-            this.fireGetCompleted(resource, destination);
         } catch (SdkException e) {
+            this.fireTransferError(resource, e, TransferEvent.REQUEST_GET);
             if (isMissing(e)) {
                 throw new ResourceDoesNotExistException(resourceName + " not found in S3", e);
             }
@@ -113,19 +120,29 @@ public final class S3Wagon extends AbstractWagon {
             }
             throw new TransferFailedException("Transfer of " + resourceName + " from S3 failed", e);
         } catch (IOException e) {
+            this.fireTransferError(resource, e, TransferEvent.REQUEST_GET);
             throw new TransferFailedException("Transfer of " + resourceName + " from S3 failed", e);
         }
     }
 
     @Override
     public void put(File source, String destination) throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
+        Resource resource = new Resource(destination);
+        resource.setContentLength(source.length());
+        resource.setLastModified(source.lastModified());
+        this.firePutInitiated(resource, source);
         if (!source.exists()) {
-            throw new ResourceDoesNotExistException(source + " does not exist locally");
+            ResourceDoesNotExistException e = new ResourceDoesNotExistException(source + " does not exist locally");
+            this.fireTransferError(resource, e, TransferEvent.REQUEST_PUT);
+            throw e;
         }
         try {
             PutObjectRequest putOb = putObjectRequest(source, destination);
-            s3.putObject(putOb, RequestBody.fromFile(source.toPath()));
+            this.firePutStarted(resource, source);
+            s3.putObject(putOb, progressReporting(source, resource));
+            this.firePutCompleted(resource, source);
         } catch (SdkException e) {
+            this.fireTransferError(resource, e, TransferEvent.REQUEST_PUT);
             if (isMissing(e)) {
                 throw new ResourceDoesNotExistException("bucket " + bucket + " not found in S3", e);
             }
@@ -133,6 +150,66 @@ public final class S3Wagon extends AbstractWagon {
                 throw new AuthorizationException("Not authorized to write " + destination + " to S3", e);
             }
             throw new TransferFailedException("Transfer of " + destination + " to S3 failed", e);
+        }
+    }
+
+    /**
+     * Streams the file to S3 while reporting progress to the transfer listeners.
+     *
+     * <p>The SDK opens a fresh stream for every attempt, which is what makes retries safe.
+     */
+    private RequestBody progressReporting(File source, Resource resource) {
+        return RequestBody.fromContentProvider(
+                () -> new ProgressReportingInputStream(openForReading(source), resource),
+                source.length(),
+                // Ask the SDK what it would have derived from the file name, so wrapping the stream
+                // does not downgrade every artifact to application/octet-stream.
+                RequestBody.fromFile(source.toPath()).contentType());
+    }
+
+    private static InputStream openForReading(File source) {
+        try {
+            return new BufferedInputStream(new FileInputStream(source));
+        } catch (IOException e) {
+            throw SdkClientException.create("Could not read " + source, e);
+        }
+    }
+
+    /**
+     * Reports every byte the SDK reads to the wagon's transfer listeners, so that uploads show
+     * progress the same way downloads do.
+     */
+    private final class ProgressReportingInputStream extends FilterInputStream {
+
+        private final Resource resource;
+
+        private ProgressReportingInputStream(InputStream in, Resource resource) {
+            super(in);
+            this.resource = resource;
+        }
+
+        @Override
+        public int read() throws IOException {
+            int read = super.read();
+            if (read != -1) {
+                report(new byte[]{(byte) read}, 1);
+            }
+            return read;
+        }
+
+        @Override
+        public int read(byte[] buffer, int offset, int length) throws IOException {
+            int read = super.read(buffer, offset, length);
+            if (read > 0) {
+                report(offset == 0 ? buffer : Arrays.copyOfRange(buffer, offset, offset + read), read);
+            }
+            return read;
+        }
+
+        private void report(byte[] buffer, int read) {
+            TransferEvent event = new TransferEvent(
+                    S3Wagon.this, resource, TransferEvent.TRANSFER_PROGRESS, TransferEvent.REQUEST_PUT);
+            fireTransferProgress(event, buffer, read);
         }
     }
 

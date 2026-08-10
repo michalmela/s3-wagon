@@ -38,6 +38,7 @@ final class FakeS3Client implements S3Client {
     private final List<PutObjectRequest> putRequests = new ArrayList<>();
     private final List<HeadObjectRequest> headRequests = new ArrayList<>();
     private final List<byte[]> putBodies = new ArrayList<>();
+    private final List<String> putBodyContentTypes = new ArrayList<>();
 
     private RuntimeException failure;
     private boolean closed;
@@ -73,6 +74,11 @@ final class FakeS3Client implements S3Client {
         return last(putBodies);
     }
 
+    /** The content type the wagon put on the upload body. */
+    String lastPutBodyContentType() {
+        return last(putBodyContentTypes);
+    }
+
     int putCount() {
         return putRequests.size();
     }
@@ -106,6 +112,7 @@ final class FakeS3Client implements S3Client {
     @Override
     public PutObjectResponse putObject(PutObjectRequest request, RequestBody body) {
         putRequests.add(request);
+        putBodyContentTypes.add(body.contentType());
         putBodies.add(readFully(body));
         throwIfFailing();
         content.put(request.key(), putBodies.get(putBodies.size() - 1));
