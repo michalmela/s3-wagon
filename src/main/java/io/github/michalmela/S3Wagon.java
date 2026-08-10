@@ -1,6 +1,7 @@
 package io.github.michalmela;
 
 import org.apache.maven.wagon.AbstractWagon;
+import org.apache.maven.wagon.ConnectionException;
 import org.apache.maven.wagon.ResourceDoesNotExistException;
 import org.apache.maven.wagon.TransferFailedException;
 import org.apache.maven.wagon.authentication.AuthenticationInfo;
@@ -15,6 +16,7 @@ import software.amazon.awssdk.core.ResponseInputStream;
 import software.amazon.awssdk.core.exception.SdkClientException;
 import software.amazon.awssdk.core.exception.SdkException;
 import software.amazon.awssdk.core.sync.RequestBody;
+import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.http.SdkHttpClient;
 import software.amazon.awssdk.http.apache.ApacheHttpClient;
 import software.amazon.awssdk.http.apache.ProxyConfiguration;
@@ -31,6 +33,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
 import java.util.Arrays;
+import java.util.function.Function;
 
 import static software.amazon.awssdk.utils.StringUtils.isNotBlank;
 
@@ -47,6 +50,22 @@ public final class S3Wagon extends AbstractWagon {
      */
     private final S3Client injectedClient;
 
+    // Settings, injected by Plexus from a <server><configuration> block in settings.xml. Each one
+    // also falls back to a system property and then an environment variable, because Leiningen has
+    // no way to pass wagon configuration through.
+    private String region;
+    private String endpoint;
+    private Boolean pathStyleAccess;
+    private String serverSideEncryption;
+    private String sseKmsKeyId;
+    private String cannedAcl;
+
+    /** Overridden by tests; environment variables cannot be set in-process. */
+    private Function<String, String> environment = System::getenv;
+
+    private ServerSideEncryption encryption;
+    private ObjectCannedACL acl;
+
     public S3Wagon() {
         this(null);
     }
@@ -56,14 +75,113 @@ public final class S3Wagon extends AbstractWagon {
     }
 
     @Override
-    protected void openConnectionInternal() {
+    protected void openConnectionInternal() throws ConnectionException {
         if (this.s3 == null) {
             this.bucket = repository.getHost();
             this.baseDirectory = baseDirectory(repository.getBasedir());
+            // Resolved once per connection so that a misspelled value fails immediately, with a
+            // message naming the setting, rather than part-way through a deploy.
+            this.encryption = encryption(serverSideEncryption());
+            this.acl = cannedAcl(cannedAcl());
             this.s3 = injectedClient != null
                     ? injectedClient
                     : s3(authenticationInfo, awsHttpClient(getProxyInfo()));
         }
+    }
+
+    public void setRegion(String region) {
+        this.region = region;
+    }
+
+    public void setEndpoint(String endpoint) {
+        this.endpoint = endpoint;
+    }
+
+    public void setPathStyleAccess(boolean pathStyleAccess) {
+        this.pathStyleAccess = pathStyleAccess;
+    }
+
+    public void setServerSideEncryption(String serverSideEncryption) {
+        this.serverSideEncryption = serverSideEncryption;
+    }
+
+    public void setSseKmsKeyId(String sseKmsKeyId) {
+        this.sseKmsKeyId = sseKmsKeyId;
+    }
+
+    public void setCannedAcl(String cannedAcl) {
+        this.cannedAcl = cannedAcl;
+    }
+
+    void setEnvironment(Function<String, String> environment) {
+        this.environment = environment;
+    }
+
+    String region() {
+        return setting(region, "s3wagon.region", "S3WAGON_REGION");
+    }
+
+    String endpoint() {
+        return setting(endpoint, "s3wagon.endpoint", "S3WAGON_ENDPOINT");
+    }
+
+    String serverSideEncryption() {
+        return setting(serverSideEncryption, "s3wagon.serverSideEncryption", "S3WAGON_SERVER_SIDE_ENCRYPTION");
+    }
+
+    String sseKmsKeyId() {
+        return setting(sseKmsKeyId, "s3wagon.sseKmsKeyId", "S3WAGON_SSE_KMS_KEY_ID");
+    }
+
+    String cannedAcl() {
+        return setting(cannedAcl, "s3wagon.cannedAcl", "S3WAGON_CANNED_ACL");
+    }
+
+    Boolean pathStyleAccess() {
+        if (pathStyleAccess != null) {
+            return pathStyleAccess;
+        }
+        String configured = setting(null, "s3wagon.pathStyleAccess", "S3WAGON_PATH_STYLE_ACCESS");
+        return configured == null ? null : Boolean.valueOf(configured);
+    }
+
+    /**
+     * Explicit configuration wins, then a system property, then an environment variable.
+     */
+    private String setting(String explicit, String property, String variable) {
+        if (isNotBlank(explicit)) {
+            return explicit;
+        }
+        String fromProperty = System.getProperty(property);
+        if (isNotBlank(fromProperty)) {
+            return fromProperty;
+        }
+        String fromEnvironment = environment.apply(variable);
+        return isNotBlank(fromEnvironment) ? fromEnvironment : null;
+    }
+
+    private static ServerSideEncryption encryption(String value) throws ConnectionException {
+        if (value == null) {
+            return null;
+        }
+        ServerSideEncryption encryption = ServerSideEncryption.fromValue(value);
+        if (encryption == ServerSideEncryption.UNKNOWN_TO_SDK_VERSION) {
+            throw new ConnectionException("unknown serverSideEncryption \"" + value + "\"; expected one of "
+                    + ServerSideEncryption.knownValues());
+        }
+        return encryption;
+    }
+
+    private static ObjectCannedACL cannedAcl(String value) throws ConnectionException {
+        if (value == null) {
+            return null;
+        }
+        ObjectCannedACL acl = ObjectCannedACL.fromValue(value);
+        if (acl == ObjectCannedACL.UNKNOWN_TO_SDK_VERSION) {
+            throw new ConnectionException("unknown cannedAcl \"" + value + "\"; expected one of "
+                    + ObjectCannedACL.knownValues());
+        }
+        return acl;
     }
 
     /**
@@ -229,11 +347,21 @@ public final class S3Wagon extends AbstractWagon {
     }
 
     private PutObjectRequest putObjectRequest(File source, String destination) {
-        return PutObjectRequest.builder()
+        PutObjectRequest.Builder request = PutObjectRequest.builder()
                 .bucket(bucket)
                 .key(key(destination))
-                .contentLength(source.length())
-                .build();
+                .contentLength(source.length());
+        if (encryption != null) {
+            request.serverSideEncryption(encryption);
+        }
+        String kmsKeyId = sseKmsKeyId();
+        if (kmsKeyId != null) {
+            request.ssekmsKeyId(kmsKeyId);
+        }
+        if (acl != null) {
+            request.acl(acl);
+        }
+        return request.build();
     }
 
     @Override
@@ -309,12 +437,33 @@ public final class S3Wagon extends AbstractWagon {
         return statusCode(e) == 404;
     }
 
-    private static S3Client s3(AuthenticationInfo authenticationInfo, SdkHttpClient httpClient) {
+    private S3Client s3(AuthenticationInfo authenticationInfo, SdkHttpClient httpClient) throws ConnectionException {
         S3ClientBuilder s3 = S3Client.builder().httpClient(httpClient);
         if (hasMinimumRequiredFields(authenticationInfo)) {
             s3.credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(authenticationInfo.getUserName(), authenticationInfo.getPassword())));
         }
+        String region = region();
+        if (region != null) {
+            s3.region(Region.of(region));
+        }
+        String endpoint = endpoint();
+        if (endpoint != null) {
+            s3.endpointOverride(endpoint(endpoint));
+        }
+        Boolean pathStyleAccess = pathStyleAccess();
+        if (pathStyleAccess != null) {
+            s3.forcePathStyle(pathStyleAccess);
+        }
         return s3.build();
+    }
+
+    private static URI endpoint(String endpoint) throws ConnectionException {
+        URI uri = URI.create(endpoint);
+        if (uri.getScheme() == null || uri.getHost() == null) {
+            throw new ConnectionException("endpoint must be an absolute URL such as https://minio.example.com,"
+                    + " but was \"" + endpoint + "\"");
+        }
+        return uri;
     }
 
     private static boolean hasMinimumRequiredFields(AuthenticationInfo authenticationInfo) {
