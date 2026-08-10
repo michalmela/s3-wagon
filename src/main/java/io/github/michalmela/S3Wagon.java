@@ -146,7 +146,9 @@ public final class S3Wagon extends AbstractWagon {
 
     @Override
     public void closeConnection() {
-        this.s3.close();
+        if (this.s3 != null) {
+            this.s3.close();
+        }
         this.s3 = null;
         this.bucket = null;
         this.baseDirectory = null;
