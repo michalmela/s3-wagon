@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+#MISE description="Deploy and resolve through real Maven against MinIO"
+#MISE depends=["build"]
+#USAGE flag "-m --maven <maven>" help="mise maven version to drive the build" default="3.9.16"
+set -euo pipefail
+
+maven="${usage_maven:-3.9.16}"
+work="$(mktemp -d)"
+container="s3-wagon-maven-e2e-$$"
+port=19000
+bucket="e2e"
+version="$(mvn -q -DforceStdout help:evaluate -Dexpression=project.version)"
+
+cleanup() {
+  docker rm -f "$container" >/dev/null 2>&1 || true
+  rm -rf "$work"
+}
+trap cleanup EXIT
+
+echo "==> starting MinIO"
+docker run -d --name "$container" -p "${port}:9000" \
+  -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+  minio/minio:RELEASE.2025-09-07T16-13-09Z server /data >/dev/null
+
+for _ in $(seq 1 60); do
+  if curl -fsS "http://127.0.0.1:${port}/minio/health/live" >/dev/null 2>&1; then break; fi
+  sleep 1
+done
+
+echo "==> creating the bucket"
+docker run --rm --network host --entrypoint sh minio/mc:RELEASE.2025-08-13T08-35-41Z -c \
+  "mc alias set e2e http://127.0.0.1:${port} minioadmin minioadmin >/dev/null && mc mb --ignore-existing e2e/${bucket} >/dev/null"
+
+repo="$work/repo"
+mkdir -p "$repo"
+
+echo "==> installing the wagon into a scratch repository"
+mvn -q -B -Dmaven.repo.local="$repo" install -DskipTests -Dspotbugs.skip=true -Dcyclonedx.skip=true
+
+cat > "$work/settings.xml" <<XML
+<settings>
+  <servers>
+    <server>
+      <id>e2e</id>
+      <username>minioadmin</username>
+      <password>minioadmin</password>
+    </server>
+  </servers>
+</settings>
+XML
+
+mkdir -p "$work/lib/src/main/java/demo"
+cat > "$work/lib/src/main/java/demo/Demo.java" <<'JAVA'
+package demo;
+public class Demo { public static String hello() { return "hello"; } }
+JAVA
+
+cat > "$work/lib/pom.xml" <<XML
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example.e2e</groupId>
+  <artifactId>demo-lib</artifactId>
+  <version>1.0.0</version>
+  <properties>
+    <maven.compiler.release>8</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+  <build>
+    <extensions>
+      <extension>
+        <groupId>io.github.michalmela</groupId>
+        <artifactId>s3-wagon</artifactId>
+        <version>${version}</version>
+      </extension>
+    </extensions>
+  </build>
+  <distributionManagement>
+    <repository>
+      <id>e2e</id>
+      <url>s3p://${bucket}/releases</url>
+    </repository>
+  </distributionManagement>
+</project>
+XML
+
+export S3WAGON_ENDPOINT="http://127.0.0.1:${port}"
+export S3WAGON_PATH_STYLE_ACCESS=true
+export S3WAGON_REGION=us-east-1
+
+echo "==> deploying with Maven ${maven}"
+mise x "maven@${maven}" -- mvn -B -q -f "$work/lib/pom.xml" \
+  -s "$work/settings.xml" -Dmaven.repo.local="$repo" deploy
+
+echo "==> checking the artifact landed in S3"
+listing=$(docker run --rm --network host --entrypoint sh minio/mc:RELEASE.2025-08-13T08-35-41Z -c \
+  "mc alias set e2e http://127.0.0.1:${port} minioadmin minioadmin >/dev/null && mc ls --recursive e2e/${bucket}")
+echo "$listing"
+echo "$listing" | grep -q "releases/com/example/e2e/demo-lib/1.0.0/demo-lib-1.0.0.jar" \
+  || { echo "FAILED: the jar is not at the expected key"; exit 1; }
+echo "$listing" | grep -q "demo-lib-1.0.0.jar.sha1" \
+  || { echo "FAILED: checksums were not published"; exit 1; }
+
+echo "==> resolving it back through the wagon, from a clean local repository"
+consumer_repo="$work/consumer-repo"
+mkdir -p "$consumer_repo"
+# The wagon itself has to be resolvable, so seed only that from the scratch repo.
+cp -R "$repo/io" "$consumer_repo/"
+
+mkdir -p "$work/app"
+cat > "$work/app/pom.xml" <<XML
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example.e2e</groupId>
+  <artifactId>demo-app</artifactId>
+  <version>1.0.0</version>
+  <properties>
+    <maven.compiler.release>8</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+  <build>
+    <extensions>
+      <extension>
+        <groupId>io.github.michalmela</groupId>
+        <artifactId>s3-wagon</artifactId>
+        <version>${version}</version>
+      </extension>
+    </extensions>
+  </build>
+  <repositories>
+    <repository>
+      <id>e2e</id>
+      <url>s3p://${bucket}/releases</url>
+    </repository>
+  </repositories>
+  <dependencies>
+    <dependency>
+      <groupId>com.example.e2e</groupId>
+      <artifactId>demo-lib</artifactId>
+      <version>1.0.0</version>
+    </dependency>
+  </dependencies>
+</project>
+XML
+
+mise x "maven@${maven}" -- mvn -B -q -f "$work/app/pom.xml" \
+  -s "$work/settings.xml" -Dmaven.repo.local="$consumer_repo" dependency:resolve
+
+test -f "$consumer_repo/com/example/e2e/demo-lib/1.0.0/demo-lib-1.0.0.jar" \
+  || { echo "FAILED: the dependency was not resolved through the wagon"; exit 1; }
+
+echo "PASSED: deployed and resolved through the wagon on Maven ${maven}"
