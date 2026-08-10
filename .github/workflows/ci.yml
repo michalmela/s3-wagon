@@ -14,7 +14,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
+  verify:
+    name: Verify
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -33,5 +34,46 @@ jobs:
           key: ${{ runner.os }}-maven-${{ hashFiles('pom.xml') }}
           restore-keys: ${{ runner.os }}-maven-
 
+      # Includes the MinIO integration tests; the runner provides Docker.
       - name: Verify
         run: mise run verify
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: target/site/jacoco/
+          if-no-files-found: ignore
+
+  runtime:
+    name: Runtime on Java ${{ matrix.label }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The artifact ships Java 8 bytecode, so it has to load and work on
+          # every JDK someone might be running Maven or Leiningen on.
+          - { label: "8", java: "zulu-8.96.0.19" }
+          - { label: "11", java: "zulu-11.90.19.0" }
+          - { label: "17", java: "zulu-17.68.17.0" }
+          - { label: "21", java: "zulu-21.52.15.0" }
+          - { label: "25", java: "zulu-25.36.15.0" }
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: jdx/mise-action@v4
+        with:
+          version: 2026.8.3
+          cache: true
+
+      - name: Cache Maven repository
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('pom.xml') }}
+          restore-keys: ${{ runner.os }}-maven-
+
+      - name: Run the wagon on Java ${{ matrix.label }}
+        run: mise run verify:runtime --java ${{ matrix.java }}

@@ -1,5 +1,7 @@
 [tools]
-java = "zulu-26.32.13.0"
+# The second JDK is only used by verify:java8, which checks that the artifact
+# really runs on the Java 8 bytecode level it ships.
+java = ["zulu-26.32.13.0", "zulu-8.96.0.19"]
 maven = "3.9.16"
 
 [env]
@@ -37,6 +39,24 @@ run = "mvn install"
 [tasks.verify]
 description = "Full verification, as run in CI"
 run = "mvn verify"
+
+[tasks."verify:runtime"]
+description = "Check that the built wagon runs on a given JDK (defaults to Java 8)"
+depends = ["build"]
+usage = '''
+flag "--java <java>" help="mise java version to run the wagon on" default="zulu-8.96.0.19"
+'''
+run = """
+set -euo pipefail
+mvn -q dependency:build-classpath -Dmdep.outputFile=target/runtime-classpath.txt -Dmdep.includeScope=runtime
+jar=$(ls target/s3-wagon-*.jar | grep -v sources | head -1)
+cp="$jar:$(cat target/runtime-classpath.txt)"
+mkdir -p target/runtime-check
+# Compiled by the modern JDK at release 8, then run on the JDK under test.
+javac --release 8 -nowarn -cp "$cp" -d target/runtime-check src/verify/java8/Java8SmokeCheck.java
+mise install "java@${usage_java}"
+mise x "java@${usage_java}" -- java -cp "target/runtime-check:$cp" Java8SmokeCheck
+"""
 
 [tasks.deploy]
 description = "Deploy a release to Clojars"
