@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Used only by the release workflow; credentials come from repository secrets. -->
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0">
+  <servers>
+    <server>
+      <id>clojars</id>
+      <username>${env.CLOJARS_USERNAME}</username>
+      <password>${env.CLOJARS_PASSWORD}</password>
+    </server>
+  </servers>
+</settings>
