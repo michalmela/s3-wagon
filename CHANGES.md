@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
   default and which some S3-compatible stores reject
 * Every setting can also come from a system property or an environment variable, since Leiningen
   cannot pass wagon configuration
+* Multipart upload for large artifacts (`multipartThreshold`, `multipartPartSize`), lifting the 5GB
+  ceiling a single PutObject imposes
+* `getFileList`, so tooling that browses a repository gets a listing instead of an
+  UnsupportedOperationException
+* Credentials from a session token (`sessionToken`) or a named profile (`profile`), including roles
+  assumed through a profile
 * Transfer events for uploads, so Maven can report upload progress
 * Object size and age are published to transfer listeners
 
@@ -34,6 +40,9 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 * `getIfNewer` compared seconds against milliseconds, so it never considered a remote artifact newer
 * Every download was reported to Maven twice
 * `s3://` worked under Leiningen but not under Maven
+* Proxy settings were built into a URL with no scheme, so the proxy was silently ignored
+* Maven's connect and read timeouts were accepted and then dropped
+* Uploads were stored as `application/octet-stream` instead of the type derived from the file name
 
 ### Upgrading from 1.0.x
 
@@ -54,6 +63,9 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 * Excluded the Netty and Apache 5 HTTP clients, which the SDK pulls in transitively even though the
   wagon always builds an Apache client
 * The JDK and Maven versions are pinned with mise, and CI builds on the same toolchain
+* Integration tests run against a real MinIO server, and CI checks that the jar runs on Java 8, 11,
+  17, 21 and 25
+* SpotBugs, a CycloneDX SBOM, reproducible jars and dependency automation via Renovate
 
 ## [1.0.2] - 2026-08-11
 

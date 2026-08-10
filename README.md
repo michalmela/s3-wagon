@@ -107,9 +107,19 @@ In `settings.xml`: unless you use [the default credential provider chain](https:
 | `sseKmsKeyId`          | KMS key to encrypt with, when `serverSideEncryption` is `aws:kms`        | `arn:aws:kms:...:key/abcd`     |
 | `cannedAcl`            | Canned ACL to apply on upload                                            | `bucket-owner-full-control`    |
 | `requestChecksumCalculation` | When to add upload checksums; see [Upgrading](#upgrading)          | `when_required`                |
+| `sessionToken`         | Session token, for temporary credentials                                 | `FwoGZXIvYXdzE...`             |
+| `profile`              | Named profile to take credentials from, including assumed roles          | `build`                        |
+| `multipartThreshold`   | Artifacts larger than this many bytes are uploaded in parts (100MB)      | `104857600`                    |
+| `multipartPartSize`    | Size of each part in bytes (16MB, never below S3's 5MB minimum)          | `16777216`                     |
 
 Everything is optional; leave a setting out and the wagon does not send it, which keeps the bucket's
 own defaults in charge.
+
+Credentials are resolved in the order: a username/password in `settings.xml` (with `sessionToken` if
+set), then `profile`, then
+[the default provider chain](https://docs.aws.amazon.com/sdk-for-java/latest/developer-guide/credentials.html#credentials-chain) -
+which is what makes `aws sso login` work without exporting anything. Connect and read timeouts come
+from Maven's own wagon configuration.
 
 Under Maven, configure them per server in `settings.xml`:
 
@@ -138,6 +148,10 @@ over an environment variable:
 | `sseKmsKeyId`          | `s3wagon.sseKmsKeyId`          | `S3WAGON_SSE_KMS_KEY_ID`          |
 | `cannedAcl`            | `s3wagon.cannedAcl`            | `S3WAGON_CANNED_ACL`              |
 | `requestChecksumCalculation` | `s3wagon.requestChecksumCalculation` | `S3WAGON_REQUEST_CHECKSUM_CALCULATION` |
+| `sessionToken`         | `s3wagon.sessionToken`         | `S3WAGON_SESSION_TOKEN`           |
+| `profile`              | `s3wagon.profile`              | `S3WAGON_PROFILE`                 |
+| `multipartThreshold`   | `s3wagon.multipartThreshold`   | `S3WAGON_MULTIPART_THRESHOLD`     |
+| `multipartPartSize`    | `s3wagon.multipartPartSize`    | `S3WAGON_MULTIPART_PART_SIZE`     |
 
 For example, to publish to a MinIO instance:
 
@@ -190,6 +204,13 @@ The JDK and Maven versions are pinned in `mise.toml`. With
 
 ```sh
 mise install     # once, to fetch the pinned toolchain
-mise run test    # run the test suite
+mise run test    # unit tests
+mise run verify  # unit tests, integration tests and static analysis
 mise run build   # build the jar
 ```
+
+`mise run verify` also runs the integration tests, which drive the wagon against a real MinIO server
+through [Testcontainers](https://testcontainers.com/). They are skipped when Docker is unavailable.
+
+The published jar is Java 8 bytecode. `mise run verify:runtime --java zulu-21.52.15.0` loads it on a
+given JDK and exercises it against a stub S3; CI runs that across Java 8, 11, 17, 21 and 25.
