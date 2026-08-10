@@ -29,20 +29,55 @@ import static software.amazon.awssdk.utils.StringUtils.isNotBlank;
 
 public final class S3Wagon extends AbstractWagon {
 
-    private volatile S3Client s3;
+    private S3Client s3;
 
-    private volatile String bucket;
+    private String bucket;
 
-    private volatile String baseDirectory;
+    private String baseDirectory;
+
+    /**
+     * Client supplied by tests; when null a real client is built on connect.
+     */
+    private final S3Client injectedClient;
+
+    public S3Wagon() {
+        this(null);
+    }
+
+    S3Wagon(S3Client injectedClient) {
+        this.injectedClient = injectedClient;
+    }
 
     @Override
     protected void openConnectionInternal() {
         if (this.s3 == null) {
             this.bucket = repository.getHost();
-            String basedir = repository.getBasedir();
-            this.baseDirectory = basedir.startsWith("/") ? basedir.substring(1) : basedir;
-            this.s3 = s3(authenticationInfo, awsHttpClient(getProxyInfo()));
+            this.baseDirectory = baseDirectory(repository.getBasedir());
+            this.s3 = injectedClient != null
+                    ? injectedClient
+                    : s3(authenticationInfo, awsHttpClient(getProxyInfo()));
         }
+    }
+
+    /**
+     * Turns a repository base directory into an S3 key prefix.
+     *
+     * <p>Repository URLs reach us exactly as the user wrote them, so the base directory may or may
+     * not have a leading or trailing slash. S3 keys have no leading slash, and the prefix has to
+     * end with one so that it does not run into the resource name.
+     */
+    static String baseDirectory(String basedir) {
+        if (basedir == null) {
+            return "";
+        }
+        String prefix = basedir.trim();
+        while (prefix.startsWith("/")) {
+            prefix = prefix.substring(1);
+        }
+        while (prefix.endsWith("/")) {
+            prefix = prefix.substring(0, prefix.length() - 1);
+        }
+        return prefix.isEmpty() ? "" : prefix + "/";
     }
 
     @Override
@@ -129,7 +164,11 @@ public final class S3Wagon extends AbstractWagon {
     }
 
     private String key(String resourceName) {
-        return this.baseDirectory + resourceName;
+        String resource = resourceName;
+        while (resource.startsWith("/")) {
+            resource = resource.substring(1);
+        }
+        return this.baseDirectory + resource;
     }
 
     static boolean isNotFound(S3Exception exception) {
