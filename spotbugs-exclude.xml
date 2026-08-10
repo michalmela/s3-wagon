@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Nothing is excluded today: the analysis is clean at Max effort down to the
+  Low threshold. This file exists so that a justified exclusion has an obvious
+  home, with the justification next to it.
+-->
+<FindBugsFilter xmlns="https://github.com/spotbugs/filter/3.0.0">
+</FindBugsFilter>

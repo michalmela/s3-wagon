@@ -49,7 +49,8 @@ flag "--java <java>" help="mise java version to run the wagon on" default="zulu-
 run = """
 set -euo pipefail
 mvn -q dependency:build-classpath -Dmdep.outputFile=target/runtime-classpath.txt -Dmdep.includeScope=runtime
-jar=$(ls target/s3-wagon-*.jar | grep -v sources | head -1)
+# The build also produces -sources and -javadoc jars; neither carries classes.
+jar=$(ls target/s3-wagon-*.jar | grep -vE -- "-(sources|javadoc)\\.jar$" | head -1)
 cp="$jar:$(cat target/runtime-classpath.txt)"
 mkdir -p target/runtime-check
 # Compiled by the modern JDK at release 8, then run on the JDK under test.
