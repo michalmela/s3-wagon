@@ -33,6 +33,7 @@ import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashSet;
@@ -509,8 +510,16 @@ public final class S3Wagon extends AbstractWagon {
                 && isNotBlank(authenticationInfo.getPassword());
     }
 
-    private static SdkHttpClient awsHttpClient(ProxyInfo proxyInfo) {
+    private SdkHttpClient awsHttpClient(ProxyInfo proxyInfo) {
         ApacheHttpClient.Builder httpClientBuilder = ApacheHttpClient.builder();
+        // Maven configures these through the Wagon interface; before this they were accepted and
+        // then dropped, leaving every build on the SDK defaults.
+        if (getTimeout() > 0) {
+            httpClientBuilder.connectionTimeout(Duration.ofMillis(getTimeout()));
+        }
+        if (getReadTimeout() > 0) {
+            httpClientBuilder.socketTimeout(Duration.ofMillis(getReadTimeout()));
+        }
         if (proxyInfo != null && isNotBlank(proxyInfo.getHost())) {
             httpClientBuilder.proxyConfiguration(ProxyConfiguration.builder()
                     .endpoint(proxyEndpoint(proxyInfo))
