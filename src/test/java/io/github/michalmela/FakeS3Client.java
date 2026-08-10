@@ -124,6 +124,10 @@ final class FakeS3Client implements S3Client {
         return listRequests.size();
     }
 
+    List<PutObjectRequest> putRequests() {
+        return putRequests;
+    }
+
     int putCount() {
         return putRequests.size();
     }

@@ -17,6 +17,7 @@ import software.amazon.awssdk.auth.credentials.AwsSessionCredentials;
 import software.amazon.awssdk.auth.credentials.ProfileCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.awscore.exception.AwsServiceException;
+import software.amazon.awssdk.awscore.retry.AwsRetryStrategy;
 import software.amazon.awssdk.core.ResponseInputStream;
 import software.amazon.awssdk.core.checksums.RequestChecksumCalculation;
 import software.amazon.awssdk.core.exception.SdkClientException;
@@ -104,6 +105,7 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
     private String multipartConcurrency;
     private String storageClass;
     private String objectTags;
+    private String retries;
 
     /** Overridden by tests; environment variables cannot be set in-process. */
     private Function<String, String> environment = System::getenv;
@@ -224,6 +226,10 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
         this.objectTags = objectTags;
     }
 
+    public void setRetries(String retries) {
+        this.retries = retries;
+    }
+
     void setEnvironment(Function<String, String> environment) {
         this.environment = environment;
     }
@@ -268,6 +274,12 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
         return (int) Math.max(1, Math.min(configured, MAX_MULTIPART_CONCURRENCY));
     }
 
+    /** Attempts after the first; the SDK's own default is used when this is unset. */
+    Integer retries() {
+        String configured = setting(retries, "s3wagon.retries", "S3WAGON_RETRIES");
+        return configured == null ? null : (int) Math.max(0, Long.parseLong(configured.trim()));
+    }
+
     String storageClass() {
         return setting(storageClass, "s3wagon.storageClass", "S3WAGON_STORAGE_CLASS");
     }
@@ -296,8 +308,10 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
         try {
             multipartThreshold();
             multipartPartSize();
+            multipartConcurrency();
+            retries();
         } catch (NumberFormatException e) {
-            throw new ConnectionException("multipartThreshold and multipartPartSize must be a number of bytes", e);
+            throw new ConnectionException("multipartThreshold, multipartPartSize, multipartConcurrency and retries must all be numbers", e);
         }
     }
 
@@ -974,6 +988,11 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
         if (checksumCalculation != null) {
             s3.requestChecksumCalculation(checksumCalculation);
         }
+        Integer retries = retries();
+        if (retries != null) {
+            s3.overrideConfiguration(o -> o.retryStrategy(
+                    AwsRetryStrategy.standardRetryStrategy().toBuilder().maxAttempts(retries + 1).build()));
+        }
         return s3.build();
     }
 
@@ -1127,6 +1146,44 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
 
     private static String relativeName(String prefix, String key) {
         return key.substring(prefix.length());
+    }
+
+    /**
+     * Directory upload is supported, so callers that have a whole tree to publish do not have to
+     * walk it themselves. Files go up one at a time; each one still reports its own transfer events.
+     */
+    @Override
+    public boolean supportsDirectoryCopy() {
+        return true;
+    }
+
+    @Override
+    public void putDirectory(File sourceDirectory, String destinationDirectory)
+            throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
+        if (!sourceDirectory.isDirectory()) {
+            throw new ResourceDoesNotExistException(sourceDirectory + " is not a directory");
+        }
+        String prefix = destinationDirectory == null || destinationDirectory.isEmpty()
+                || ".".equals(destinationDirectory)
+                ? ""
+                : destinationDirectory.endsWith("/") ? destinationDirectory : destinationDirectory + "/";
+        putDirectoryContents(sourceDirectory, prefix);
+    }
+
+    private void putDirectoryContents(File directory, String prefix)
+            throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
+        File[] children = directory.listFiles();
+        if (children == null) {
+            throw new TransferFailedException("Could not list " + directory);
+        }
+        Arrays.sort(children);
+        for (File child : children) {
+            if (child.isDirectory()) {
+                putDirectoryContents(child, prefix + child.getName() + "/");
+            } else {
+                put(child, prefix + child.getName());
+            }
+        }
     }
 
     @Override
