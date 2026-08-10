@@ -1,0 +1,49 @@
+[tools]
+java = "zulu-26.32.13.0"
+maven = "3.9.16"
+
+[env]
+# Keep the local repository resolution reproducible across machines and CI.
+MAVEN_ARGS = "--batch-mode --no-transfer-progress"
+
+[tasks.clean]
+description = "Remove build output"
+run = "mvn clean"
+
+[tasks.compile]
+description = "Compile main sources"
+run = "mvn compile"
+sources = ["pom.xml", "src/main/**/*"]
+outputs = { auto = true }
+
+[tasks.test]
+description = "Run the unit test suite"
+run = "mvn test"
+sources = ["pom.xml", "src/main/**/*", "src/test/**/*"]
+outputs = { auto = true }
+
+[tasks.build]
+description = "Build the wagon jar (runs tests)"
+depends = ["test"]
+run = "mvn package"
+sources = ["pom.xml", "src/main/**/*", "src/test/**/*"]
+outputs = ["target/s3-wagon-*.jar"]
+
+[tasks.install]
+description = "Install the wagon into the local Maven repository"
+depends = ["build"]
+run = "mvn install"
+
+[tasks.verify]
+description = "Full verification, as run in CI"
+run = "mvn verify"
+
+[tasks.deploy]
+description = "Deploy a release to Clojars"
+confirm = "Deploy a release to Clojars?"
+depends = ["verify"]
+run = "mvn deploy"
+
+[tasks.pre-commit]
+description = "Checks that run before every commit"
+depends = ["test"]
