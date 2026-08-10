@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
   UnsupportedOperationException
 * Credentials from a session token (`sessionToken`) or a named profile (`profile`), including roles
   assumed through a profile
+* StreamingWagon, so transfers the resolver wants in memory - checksums, mostly - no longer go
+  through a temporary file
+* Parallel multipart part uploads (`multipartConcurrency`, four by default)
+* Directory upload (`putDirectory`), storage class, object tags and retry configuration
+* Debug diagnostics: the resolved endpoint, region, prefix and credential source, without ever
+  logging the credentials themselves
 * Transfer events for uploads, so Maven can report upload progress
 * Object size and age are published to transfer listeners
 
@@ -41,6 +47,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 * Every download was reported to Maven twice
 * `s3://` worked under Leiningen but not under Maven
 * Proxy settings were built into a URL with no scheme, so the proxy was silently ignored
+* `getFileList` threw UnsupportedOperationException instead of listing a directory
 * Maven's connect and read timeouts were accepted and then dropped
 * Uploads were stored as `application/octet-stream` instead of the type derived from the file name
 
@@ -66,6 +73,9 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 * Integration tests run against a real MinIO server, and CI checks that the jar runs on Java 8, 11,
   17, 21 and 25
 * SpotBugs, a CycloneDX SBOM, reproducible jars and dependency automation via Renovate
+* End-to-end tests that deploy and resolve through real Maven 3 and Maven 4, a gated round trip
+  against real AWS S3, CodeQL, OpenSSF Scorecard, SHA-pinned GitHub Actions and an automated
+  release
 
 ## [1.0.2] - 2026-08-11
 

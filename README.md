@@ -111,6 +111,10 @@ In `settings.xml`: unless you use [the default credential provider chain](https:
 | `profile`              | Named profile to take credentials from, including assumed roles          | `build`                        |
 | `multipartThreshold`   | Artifacts larger than this many bytes are uploaded in parts (100MB)      | `104857600`                    |
 | `multipartPartSize`    | Size of each part in bytes (16MB, never below S3's 5MB minimum)          | `16777216`                     |
+| `multipartConcurrency` | Parts uploaded at once (4, clamped to 1..16)                             | `8`                            |
+| `storageClass`         | Storage class for uploaded objects                                       | `STANDARD_IA`                  |
+| `objectTags`           | Tags to apply on upload, as a URL-encoded query string                   | `team=platform&tier=build`     |
+| `retries`              | Retry attempts after the first (the SDK's default when unset)            | `5`                            |
 
 Everything is optional; leave a setting out and the wagon does not send it, which keeps the bucket's
 own defaults in charge.
@@ -152,6 +156,10 @@ over an environment variable:
 | `profile`              | `s3wagon.profile`              | `S3WAGON_PROFILE`                 |
 | `multipartThreshold`   | `s3wagon.multipartThreshold`   | `S3WAGON_MULTIPART_THRESHOLD`     |
 | `multipartPartSize`    | `s3wagon.multipartPartSize`    | `S3WAGON_MULTIPART_PART_SIZE`     |
+| `multipartConcurrency` | `s3wagon.multipartConcurrency` | `S3WAGON_MULTIPART_CONCURRENCY`   |
+| `storageClass`         | `s3wagon.storageClass`         | `S3WAGON_STORAGE_CLASS`           |
+| `objectTags`           | `s3wagon.objectTags`           | `S3WAGON_OBJECT_TAGS`             |
+| `retries`              | `s3wagon.retries`              | `S3WAGON_RETRIES`                 |
 
 For example, to publish to a MinIO instance:
 
@@ -159,6 +167,19 @@ For example, to publish to a MinIO instance:
 export S3WAGON_ENDPOINT=https://minio.example.com
 export S3WAGON_PATH_STYLE_ACCESS=true
 ```
+
+## Troubleshooting
+
+The wagon reports what it resolved at debug level, so `mvn -X` (or `lein -o ... :debug`) answers
+most configuration questions directly:
+
+```
+s3-wagon: bucket=somebucket prefix=releases/ region=eu-central-1 endpoint=<aws> \
+          pathStyleAccess=<default> credentials=default provider chain \
+          connectTimeout=0ms readTimeout=0ms
+```
+
+Credentials themselves are never logged.
 
 ## Upgrading
 
@@ -212,5 +233,16 @@ mise run build   # build the jar
 `mise run verify` also runs the integration tests, which drive the wagon against a real MinIO server
 through [Testcontainers](https://testcontainers.com/). They are skipped when Docker is unavailable.
 
-The published jar is Java 8 bytecode. `mise run verify:runtime --java zulu-21.52.15.0` loads it on a
-given JDK and exercises it against a stub S3; CI runs that across Java 8, 11, 17, 21 and 25.
+Two further checks run in CI and can be run locally:
+
+```sh
+mise run verify:runtime --java zulu-8.96.0.19   # load the built jar on a given JDK
+mise run verify:maven --maven 4.0.0-rc-6        # deploy and resolve through real Maven
+```
+
+The published jar is Java 8 bytecode; CI loads it on Java 8, 11, 17, 21 and 25, and runs a real
+`mvn deploy` plus resolve against MinIO on both Maven 3 and Maven 4.
+
+To run the integration tests against real AWS S3 instead of MinIO, set `S3_WAGON_TEST_BUCKET` (and
+optionally `S3_WAGON_TEST_REGION`); credentials come from the default provider chain. Those tests
+are skipped when the variable is unset.
