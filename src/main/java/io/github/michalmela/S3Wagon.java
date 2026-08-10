@@ -242,6 +242,8 @@ public final class S3Wagon extends AbstractWagon {
             }
             throw new TransferFailedException("Transfer of " + resourceName + " from S3 failed", e);
         } catch (IOException e) {
+            // Only close() declares IOException here, and getTransfer closes the stream first, so
+            // in practice a broken stream is reported there. This keeps the contract honest anyway.
             this.fireTransferError(resource, e, TransferEvent.REQUEST_GET);
             throw new TransferFailedException("Transfer of " + resourceName + " from S3 failed", e);
         }

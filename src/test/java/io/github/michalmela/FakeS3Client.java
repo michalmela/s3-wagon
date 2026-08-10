@@ -12,6 +12,8 @@ import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.PutObjectResponse;
 
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
@@ -42,6 +44,27 @@ final class FakeS3Client implements S3Client {
 
     private RuntimeException failure;
     private boolean closed;
+    private boolean failOnStreamClose;
+    private ReadStyle readStyle = ReadStyle.BULK;
+
+    /** How the fake drains an upload body, to exercise each read path of the progress stream. */
+    enum ReadStyle {
+        /** read(buffer, 0, length) - what the SDK normally does. */
+        BULK,
+        /** read() - one byte at a time. */
+        SINGLE_BYTE,
+        /** read(buffer, offset, length) with a non-zero offset. */
+        OFFSET
+    }
+
+    void readUploadsAs(ReadStyle readStyle) {
+        this.readStyle = readStyle;
+    }
+
+    /** Makes the download stream throw when it is closed, after the bytes have been read. */
+    void failOnStreamClose() {
+        this.failOnStreamClose = true;
+    }
 
     /** Seeds an object so that get/head can find it. */
     void seed(String key, byte[] bytes, Instant modified) {
@@ -106,7 +129,16 @@ final class FakeS3Client implements S3Client {
                 .contentLength((long) bytes.length)
                 .lastModified(lastModified.get(request.key()))
                 .build();
-        return new ResponseInputStream<>(response, new ByteArrayInputStream(bytes));
+        InputStream body = new ByteArrayInputStream(bytes);
+        if (failOnStreamClose) {
+            body = new FilterInputStream(body) {
+                @Override
+                public void close() throws IOException {
+                    throw new IOException("the connection dropped while closing");
+                }
+            };
+        }
+        return new ResponseInputStream<>(response, body);
     }
 
     @Override
@@ -140,13 +172,29 @@ final class FakeS3Client implements S3Client {
         }
     }
 
-    private static byte[] readFully(RequestBody body) {
+    private byte[] readFully(RequestBody body) {
         try (InputStream in = body.contentStreamProvider().newStream()) {
-            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
-            byte[] buffer = new byte[8192];
-            int read;
-            while ((read = in.read(buffer)) != -1) {
-                out.write(buffer, 0, read);
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            switch (readStyle) {
+                case SINGLE_BYTE:
+                    int b;
+                    while ((b = in.read()) != -1) {
+                        out.write(b);
+                    }
+                    break;
+                case OFFSET:
+                    byte[] offsetBuffer = new byte[8192];
+                    int offsetRead;
+                    while ((offsetRead = in.read(offsetBuffer, 512, 4096)) != -1) {
+                        out.write(offsetBuffer, 512, offsetRead);
+                    }
+                    break;
+                default:
+                    byte[] buffer = new byte[8192];
+                    int read;
+                    while ((read = in.read(buffer)) != -1) {
+                        out.write(buffer, 0, read);
+                    }
             }
             return out.toByteArray();
         } catch (IOException e) {
