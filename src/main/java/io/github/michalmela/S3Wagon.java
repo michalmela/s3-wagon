@@ -13,6 +13,7 @@ import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.awscore.exception.AwsServiceException;
 import software.amazon.awssdk.core.ResponseInputStream;
+import software.amazon.awssdk.core.checksums.RequestChecksumCalculation;
 import software.amazon.awssdk.core.exception.SdkClientException;
 import software.amazon.awssdk.core.exception.SdkException;
 import software.amazon.awssdk.core.sync.RequestBody;
@@ -62,12 +63,14 @@ public final class S3Wagon extends AbstractWagon {
     private String serverSideEncryption;
     private String sseKmsKeyId;
     private String cannedAcl;
+    private String requestChecksumCalculation;
 
     /** Overridden by tests; environment variables cannot be set in-process. */
     private Function<String, String> environment = System::getenv;
 
     private ServerSideEncryption encryption;
     private ObjectCannedACL acl;
+    private RequestChecksumCalculation checksumCalculation;
 
     public S3Wagon() {
         this(null);
@@ -86,6 +89,7 @@ public final class S3Wagon extends AbstractWagon {
             // message naming the setting, rather than part-way through a deploy.
             this.encryption = encryption(serverSideEncryption());
             this.acl = cannedAcl(cannedAcl());
+            this.checksumCalculation = checksumCalculation(requestChecksumCalculation());
             this.s3 = injectedClient != null
                     ? injectedClient
                     : s3(authenticationInfo, awsHttpClient(getProxyInfo()));
@@ -116,6 +120,10 @@ public final class S3Wagon extends AbstractWagon {
         this.cannedAcl = cannedAcl;
     }
 
+    public void setRequestChecksumCalculation(String requestChecksumCalculation) {
+        this.requestChecksumCalculation = requestChecksumCalculation;
+    }
+
     void setEnvironment(Function<String, String> environment) {
         this.environment = environment;
     }
@@ -138,6 +146,27 @@ public final class S3Wagon extends AbstractWagon {
 
     String cannedAcl() {
         return setting(cannedAcl, "s3wagon.cannedAcl", "S3WAGON_CANNED_ACL");
+    }
+
+    String requestChecksumCalculation() {
+        return setting(requestChecksumCalculation,
+                "s3wagon.requestChecksumCalculation", "S3WAGON_REQUEST_CHECKSUM_CALCULATION");
+    }
+
+    /**
+     * Since 2.30 the SDK adds a CRC32 trailer to uploads by default, which some S3-compatible
+     * stores reject. {@code when_required} restores the wire format older versions used.
+     */
+    private static RequestChecksumCalculation checksumCalculation(String value) throws ConnectionException {
+        if (value == null) {
+            return null;
+        }
+        try {
+            return RequestChecksumCalculation.fromValue(value);
+        } catch (IllegalArgumentException e) {
+            throw new ConnectionException("unknown requestChecksumCalculation \"" + value
+                    + "\"; expected when_supported or when_required", e);
+        }
     }
 
     Boolean pathStyleAccess() {
@@ -458,6 +487,9 @@ public final class S3Wagon extends AbstractWagon {
         Boolean pathStyleAccess = pathStyleAccess();
         if (pathStyleAccess != null) {
             s3.forcePathStyle(pathStyleAccess);
+        }
+        if (checksumCalculation != null) {
+            s3.requestChecksumCalculation(checksumCalculation);
         }
         return s3.build();
     }

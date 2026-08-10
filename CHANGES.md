@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 * Custom endpoints (`endpoint`) and path-style access (`pathStyleAccess`), so the wagon works
   against S3-compatible stores such as MinIO
 * An explicit `region` setting, for when the default provider chain cannot work one out
+* A `requestChecksumCalculation` setting, to opt out of the upload checksum trailer the SDK adds by
+  default and which some S3-compatible stores reject
 * Every setting can also come from a system property or an environment variable, since Leiningen
   cannot pass wagon configuration
 * Transfer events for uploads, so Maven can report upload progress
@@ -32,6 +34,17 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 * `getIfNewer` compared seconds against milliseconds, so it never considered a remote artifact newer
 * Every download was reported to Maven twice
 * `s3://` worked under Leiningen but not under Maven
+
+### Upgrading from 1.0.x
+
+* **Repository URLs without a trailing slash now resolve to different S3 keys.** 1.0.x wrote them
+  to a mangled prefix (`releasescom/example/...` for a `releases` prefix and a `com.example` group);
+  1.1.0 writes and reads `releases/com/example/...` and will not see previously published
+  artifacts. Move the objects or re-deploy - see the README. URLs that already ended with a slash
+  are unaffected.
+* **Uploads now carry a CRC32 checksum trailer** (`x-amz-trailer`, `Content-Encoding: aws-chunked`),
+  which the SDK adds by default from 2.30 onwards. AWS S3 accepts it; some S3-compatible stores do
+  not. Set `requestChecksumCalculation` to `when_required` to restore the 1.0.x wire format.
 
 ### Changed
 

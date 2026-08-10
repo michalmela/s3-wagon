@@ -106,6 +106,7 @@ In `settings.xml`: unless you use [the default credential provider chain](https:
 | `serverSideEncryption` | Server-side encryption to apply on upload                                | `AES256`, `aws:kms`            |
 | `sseKmsKeyId`          | KMS key to encrypt with, when `serverSideEncryption` is `aws:kms`        | `arn:aws:kms:...:key/abcd`     |
 | `cannedAcl`            | Canned ACL to apply on upload                                            | `bucket-owner-full-control`    |
+| `requestChecksumCalculation` | When to add upload checksums; see [Upgrading](#upgrading)          | `when_required`                |
 
 Everything is optional; leave a setting out and the wagon does not send it, which keeps the bucket's
 own defaults in charge.
@@ -136,12 +137,50 @@ over an environment variable:
 | `serverSideEncryption` | `s3wagon.serverSideEncryption` | `S3WAGON_SERVER_SIDE_ENCRYPTION`  |
 | `sseKmsKeyId`          | `s3wagon.sseKmsKeyId`          | `S3WAGON_SSE_KMS_KEY_ID`          |
 | `cannedAcl`            | `s3wagon.cannedAcl`            | `S3WAGON_CANNED_ACL`              |
+| `requestChecksumCalculation` | `s3wagon.requestChecksumCalculation` | `S3WAGON_REQUEST_CHECKSUM_CALCULATION` |
 
 For example, to publish to a MinIO instance:
 
 ```sh
 export S3WAGON_ENDPOINT=https://minio.example.com
 export S3WAGON_PATH_STYLE_ACCESS=true
+```
+
+## Upgrading
+
+### From 1.0.x, if your repository URL has no trailing slash
+
+Before 1.1.0 the S3 key was built by concatenating the URL path and the resource name without a
+separator, so a URL like `s3p://somebucket/releases` (no trailing slash) wrote artifacts to keys
+such as `releasesg/a/1.0/a-1.0.jar`. 1.1.0 fixes that, which means it now reads and writes
+`releases/g/a/1.0/a-1.0.jar` - and will **not** see artifacts published by earlier versions.
+
+Note that the old keys are the prefix run together with the *group path*, so there is one mangled
+prefix per leading group segment - `com.example` ended up under `releasescom/example/...`, `org.foo`
+under `releasesorg/foo/...`. List what you actually have first:
+
+```sh
+aws s3 ls s3://somebucket/ | grep -v ' releases/'
+```
+
+then move each one into place:
+
+```sh
+aws s3 mv --recursive s3://somebucket/releasescom/ s3://somebucket/releases/com/
+```
+
+Re-deploying the affected artifacts works just as well. Repository URLs that already ended with a
+slash are unaffected.
+
+### Uploads carry a checksum trailer
+
+The AWS SDK adds a CRC32 trailer (`x-amz-trailer`, `Content-Encoding: aws-chunked`) to uploads by
+default, which SDK 2.19 - used by 1.0.x - did not. AWS S3 handles this fine, but some S3-compatible
+stores reject it. If a previously working upload starts failing against a non-AWS endpoint, restore
+the old wire format:
+
+```sh
+export S3WAGON_REQUEST_CHECKSUM_CALCULATION=when_required
 ```
 
 ## Building
