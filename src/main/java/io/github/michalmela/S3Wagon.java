@@ -11,6 +11,7 @@ import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.awscore.exception.AwsServiceException;
 import software.amazon.awssdk.core.ResponseInputStream;
+import software.amazon.awssdk.core.exception.SdkException;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.http.SdkHttpClient;
 import software.amazon.awssdk.http.apache.ApacheHttpClient;
@@ -103,29 +104,44 @@ public final class S3Wagon extends AbstractWagon {
                 this.getTransfer(resource, destination, is);
             }
             this.fireGetCompleted(resource, destination);
-        } catch (NoSuchKeyException | NoSuchBucketException e) {
-            throw new ResourceDoesNotExistException(resourceName + " not found in S3", e);
-        } catch (S3Exception e) {
-            if (isNotFound(e)) {
+        } catch (SdkException e) {
+            if (isMissing(e)) {
                 throw new ResourceDoesNotExistException(resourceName + " not found in S3", e);
             }
-            throw new TransferFailedException("Transfer from S3 failed", e);
-        } catch (ExpiredTokenException e) {
-            throw new AuthorizationException("S3 authorization error", e);
+            if (isAuthorizationFailure(e)) {
+                throw new AuthorizationException("Not authorized to read " + resourceName + " from S3", e);
+            }
+            throw new TransferFailedException("Transfer of " + resourceName + " from S3 failed", e);
         } catch (IOException e) {
-            throw new TransferFailedException("Transfer from S3 failed", e);
+            throw new TransferFailedException("Transfer of " + resourceName + " from S3 failed", e);
         }
     }
 
     @Override
-    public void put(File source, String destination) {
-        PutObjectRequest putOb = PutObjectRequest.builder()
+    public void put(File source, String destination) throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
+        if (!source.exists()) {
+            throw new ResourceDoesNotExistException(source + " does not exist locally");
+        }
+        try {
+            PutObjectRequest putOb = putObjectRequest(source, destination);
+            s3.putObject(putOb, RequestBody.fromFile(source.toPath()));
+        } catch (SdkException e) {
+            if (isMissing(e)) {
+                throw new ResourceDoesNotExistException("bucket " + bucket + " not found in S3", e);
+            }
+            if (isAuthorizationFailure(e)) {
+                throw new AuthorizationException("Not authorized to write " + destination + " to S3", e);
+            }
+            throw new TransferFailedException("Transfer of " + destination + " to S3 failed", e);
+        }
+    }
+
+    private PutObjectRequest putObjectRequest(File source, String destination) {
+        return PutObjectRequest.builder()
                 .bucket(bucket)
                 .key(key(destination))
                 .contentLength(source.length())
                 .build();
-
-        s3.putObject(putOb, RequestBody.fromFile(source.toPath()));
     }
 
     @Override
@@ -140,19 +156,37 @@ public final class S3Wagon extends AbstractWagon {
         try {
             HeadObjectResponse headObject = headObject(resourceName);
             return headObject.lastModified().getEpochSecond() > timestamp;
-        } catch (NoSuchKeyException | NoSuchBucketException e) {
-            throw new ResourceDoesNotExistException(resourceName + " not found in S3", e);
-        } catch (S3Exception e) {
-            if (isNotFound(e)) {
+        } catch (SdkException e) {
+            if (isMissing(e)) {
                 throw new ResourceDoesNotExistException(resourceName + " not found in S3", e);
             }
-            throw new TransferFailedException("Transfer from S3 failed", e);
-        } catch (ExpiredTokenException e) {
-            throw new AuthorizationException("S3 authorization error", e);
-        } catch (AwsServiceException e) {
-            throw new TransferFailedException("Transfer from S3 failed", e);
+            if (isAuthorizationFailure(e)) {
+                throw new AuthorizationException("Not authorized to read " + resourceName + " from S3", e);
+            }
+            throw new TransferFailedException("Lookup of " + resourceName + " in S3 failed", e);
         }
+    }
 
+    /**
+     * Whether the failure means "this object or bucket is not there".
+     *
+     * <p>A HEAD response carries no body for the SDK to parse an error code out of, so a missing
+     * object can surface as a plain 404 rather than as {@link NoSuchKeyException}.
+     */
+    private static boolean isMissing(SdkException e) {
+        return e instanceof NoSuchKeyException
+                || e instanceof NoSuchBucketException
+                || isNotFound(e);
+    }
+
+    private static boolean isAuthorizationFailure(SdkException e) {
+        return e instanceof ExpiredTokenException
+                || statusCode(e) == 401
+                || statusCode(e) == 403;
+    }
+
+    private static int statusCode(SdkException e) {
+        return e instanceof AwsServiceException ? ((AwsServiceException) e).statusCode() : -1;
     }
 
     private HeadObjectResponse headObject(String resourceName) {
@@ -171,8 +205,14 @@ public final class S3Wagon extends AbstractWagon {
         return this.baseDirectory + resource;
     }
 
-    static boolean isNotFound(S3Exception exception) {
-        return exception.statusCode() == 404;
+    /**
+     * Whether the failure is a bare HTTP 404, with no error code in the body to identify it by.
+     *
+     * <p>Package-private so it can be asserted on directly; {@link #isMissing} is the predicate the
+     * transfer paths actually use.
+     */
+    static boolean isNotFound(SdkException e) {
+        return statusCode(e) == 404;
     }
 
     private static S3Client s3(AuthenticationInfo authenticationInfo, SdkHttpClient httpClient) {
@@ -208,11 +248,14 @@ public final class S3Wagon extends AbstractWagon {
         try {
             headObject(resourceName);
             return true;
-        } catch (S3Exception e) {
-            if (isNotFound(e)) {
+        } catch (SdkException e) {
+            if (isMissing(e)) {
                 return false;
             }
-            throw e;
+            if (isAuthorizationFailure(e)) {
+                throw new AuthorizationException("Not authorized to read " + resourceName + " from S3", e);
+            }
+            throw new TransferFailedException("Lookup of " + resourceName + " in S3 failed", e);
         }
     }
 
