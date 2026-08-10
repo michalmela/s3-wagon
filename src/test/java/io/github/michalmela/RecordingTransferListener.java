@@ -67,8 +67,14 @@ final class RecordingTransferListener implements TransferListener {
         error = event.getException();
     }
 
+    private final List<String> debug = new ArrayList<>();
+
+    List<String> debugMessages() {
+        return debug;
+    }
+
     @Override
     public void debug(String message) {
-        // not interesting for these tests
+        debug.add(message);
     }
 }

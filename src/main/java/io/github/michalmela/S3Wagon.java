@@ -122,7 +122,35 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
             this.s3 = injectedClient != null
                     ? injectedClient
                     : s3(authenticationInfo, awsHttpClient(getProxyInfo()));
+            describeConnection();
         }
+    }
+
+    /**
+     * Explains what the wagon resolved before anything is transferred.
+     *
+     * <p>Failures here are nearly always configuration - the wrong endpoint, the wrong credentials,
+     * a prefix that is not what the user thought. Running Maven with -X should answer that without
+     * anyone having to guess.
+     */
+    private void describeConnection() {
+        fireTransferDebug("s3-wagon: bucket=" + bucket
+                + " prefix=" + (baseDirectory.isEmpty() ? "<root>" : baseDirectory)
+                + " region=" + (region() == null ? "<from provider chain>" : region())
+                + " endpoint=" + (endpoint() == null ? "<aws>" : endpoint())
+                + " pathStyleAccess=" + (pathStyleAccess() == null ? "<default>" : pathStyleAccess())
+                + " credentials=" + credentialsSource()
+                + " connectTimeout=" + getTimeout() + "ms readTimeout=" + getReadTimeout() + "ms");
+        if (encryption != null || acl != null) {
+            fireTransferDebug("s3-wagon: serverSideEncryption=" + encryption + " cannedAcl=" + acl);
+        }
+    }
+
+    private String credentialsSource() {
+        if (hasMinimumRequiredFields(authenticationInfo)) {
+            return sessionToken() != null ? "settings.xml (with session token)" : "settings.xml";
+        }
+        return profile() != null ? "profile " + profile() : "default provider chain";
     }
 
     public void setRegion(String region) {
@@ -403,6 +431,8 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
         }
         try {
             this.firePutStarted(resource, source);
+            fireTransferDebug("s3-wagon: uploading " + source.length() + " bytes to s3://" + bucket
+                    + "/" + key(destination));
             if (source.length() > multipartThreshold()) {
                 uploadInParts(source, destination, resource);
             } else {
@@ -508,6 +538,8 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
         long length = source.length();
         long partSize = partSizeFor(length);
         String uploadId = s3.createMultipartUpload(createMultipartUploadRequest(source, destination)).uploadId();
+        fireTransferDebug("s3-wagon: multipart upload " + uploadId + " of " + length
+                + " bytes in parts of " + partSize);
         try {
             List<CompletedPart> parts = new ArrayList<>();
             long offset = 0;
@@ -926,6 +958,7 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
     public List<String> getFileList(String destinationDirectory)
             throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
         String prefix = directoryPrefix(destinationDirectory);
+        fireTransferDebug("s3-wagon: listing s3://" + bucket + "/" + prefix);
         try {
             List<String> names = new ArrayList<>();
             String continuationToken = null;
