@@ -285,7 +285,7 @@ final class FakeS3Client implements S3Client {
     }
 
     @Override
-    public UploadPartResponse uploadPart(UploadPartRequest request, RequestBody body) {
+    public synchronized UploadPartResponse uploadPart(UploadPartRequest request, RequestBody body) {
         uploadPartRequests.add(request);
         throwIfFailing();
         byte[] part = readFully(body);
@@ -293,7 +293,12 @@ final class FakeS3Client implements S3Client {
             throw software.amazon.awssdk.core.exception.SdkClientException.create(
                     "part " + request.partNumber() + " failed");
         }
-        uploadedParts.get(request.uploadId()).add(part);
+        // Parts can arrive out of order when uploaded concurrently, so index by part number.
+        List<byte[]> parts = uploadedParts.get(request.uploadId());
+        while (parts.size() < request.partNumber()) {
+            parts.add(null);
+        }
+        parts.set(request.partNumber() - 1, part);
         return UploadPartResponse.builder().eTag("etag-" + request.partNumber()).build();
     }
 

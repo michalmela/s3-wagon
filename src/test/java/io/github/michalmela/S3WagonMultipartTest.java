@@ -154,6 +154,72 @@ class S3WagonMultipartTest {
     }
 
     @Test
+    void defaultsToFourConcurrentParts() {
+        assertEquals(4, new S3Wagon(new FakeS3Client()).multipartConcurrency());
+    }
+
+    @Test
+    void clampsConcurrencyToSaneBounds() {
+        S3Wagon wagon = new S3Wagon(new FakeS3Client());
+        wagon.setMultipartConcurrency("0");
+        assertEquals(1, wagon.multipartConcurrency());
+        wagon.setMultipartConcurrency("1000");
+        assertEquals(16, wagon.multipartConcurrency());
+    }
+
+    /** Parts go out on several threads, so the assembled object must still be byte-identical. */
+    @Test
+    void assemblesPartsCorrectlyWhenUploadedInParallel() throws Exception {
+        byte[] payload = new byte[26 * 1024 * 1024];
+        new Random(21).nextBytes(payload);
+        FakeS3Client s3 = new FakeS3Client();
+        S3Wagon wagon = new S3Wagon(s3);
+        wagon.setMultipartThreshold("1048576");
+        wagon.setMultipartPartSize("5242880");
+        wagon.setMultipartConcurrency("4");
+        wagon.connect(new Repository("test", "s3p://bucket/releases/"));
+
+        wagon.put(fileContaining(payload), RESOURCE);
+
+        assertEquals(6, s3.uploadPartRequests().size());
+        assertArrayEquals(payload, s3.objectContent(KEY));
+    }
+
+    @Test
+    void reportsEveryByteWhenUploadingInParallel() throws Exception {
+        byte[] payload = new byte[16 * 1024 * 1024];
+        FakeS3Client s3 = new FakeS3Client();
+        RecordingTransferListener listener = new RecordingTransferListener();
+        S3Wagon wagon = new S3Wagon(s3);
+        wagon.setMultipartThreshold("1048576");
+        wagon.setMultipartPartSize("5242880");
+        wagon.setMultipartConcurrency("4");
+        wagon.connect(new Repository("test", "s3p://bucket/releases/"));
+        wagon.addTransferListener(listener);
+
+        wagon.put(fileContaining(payload), RESOURCE);
+
+        assertEquals(payload.length, listener.bytesReported());
+    }
+
+    @Test
+    void abortsWhenAParallelPartFails() throws Exception {
+        FakeS3Client s3 = new FakeS3Client();
+        s3.failUploadPart(3);
+        S3Wagon wagon = new S3Wagon(s3);
+        wagon.setMultipartThreshold("1048576");
+        wagon.setMultipartPartSize("5242880");
+        wagon.setMultipartConcurrency("4");
+        wagon.connect(new Repository("test", "s3p://bucket/releases/"));
+        File source = fileContaining(new byte[26 * 1024 * 1024]);
+
+        assertThrows(TransferFailedException.class, () -> wagon.put(source, RESOURCE));
+
+        assertTrue(s3.isAborted());
+        assertFalse(s3.isMultipartCompleted());
+    }
+
+    @Test
     void rejectsMalformedSizesOnConnect() {
         S3Wagon wagon = new S3Wagon(new FakeS3Client());
         wagon.setMultipartThreshold("plenty");

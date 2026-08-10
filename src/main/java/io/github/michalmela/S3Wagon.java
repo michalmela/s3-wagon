@@ -50,6 +50,10 @@ import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.function.Function;
 
 import static software.amazon.awssdk.utils.StringUtils.isNotBlank;
@@ -58,6 +62,11 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
 
     /** S3 accepts at most 10000 parts in a multipart upload. */
     private static final int MAX_PARTS = 10_000;
+
+    private static final long DEFAULT_MULTIPART_CONCURRENCY = 4;
+
+    /** More connections than the HTTP client's default pool would only queue. */
+    private static final int MAX_MULTIPART_CONCURRENCY = 16;
 
     /** Artifacts bigger than this are uploaded in parts. */
     private static final long DEFAULT_MULTIPART_THRESHOLD = 100L * 1024 * 1024;
@@ -92,9 +101,15 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
     private String multipartPartSize;
     private String sessionToken;
     private String profile;
+    private String multipartConcurrency;
+    private String storageClass;
+    private String objectTags;
 
     /** Overridden by tests; environment variables cannot be set in-process. */
     private Function<String, String> environment = System::getenv;
+
+    /** Guards transfer-progress events, which concurrent part uploads would otherwise interleave. */
+    private final Object progressLock = new Object();
 
     private ServerSideEncryption encryption;
     private ObjectCannedACL acl;
@@ -197,6 +212,18 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
         this.profile = profile;
     }
 
+    public void setMultipartConcurrency(String multipartConcurrency) {
+        this.multipartConcurrency = multipartConcurrency;
+    }
+
+    public void setStorageClass(String storageClass) {
+        this.storageClass = storageClass;
+    }
+
+    public void setObjectTags(String objectTags) {
+        this.objectTags = objectTags;
+    }
+
     void setEnvironment(Function<String, String> environment) {
         this.environment = environment;
     }
@@ -232,6 +259,21 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
 
     String profile() {
         return setting(profile, "s3wagon.profile", "S3WAGON_PROFILE");
+    }
+
+    int multipartConcurrency() {
+        long configured = bytes(
+                setting(multipartConcurrency, "s3wagon.multipartConcurrency", "S3WAGON_MULTIPART_CONCURRENCY"),
+                DEFAULT_MULTIPART_CONCURRENCY);
+        return (int) Math.max(1, Math.min(configured, MAX_MULTIPART_CONCURRENCY));
+    }
+
+    String storageClass() {
+        return setting(storageClass, "s3wagon.storageClass", "S3WAGON_STORAGE_CLASS");
+    }
+
+    String objectTags() {
+        return setting(objectTags, "s3wagon.objectTags", "S3WAGON_OBJECT_TAGS");
     }
 
     long multipartThreshold() {
@@ -507,7 +549,11 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
         private void report(byte[] buffer, int read) {
             TransferEvent event = new TransferEvent(
                     S3Wagon.this, resource, TransferEvent.TRANSFER_PROGRESS, TransferEvent.REQUEST_PUT);
-            fireTransferProgress(event, buffer, read);
+            // Parts may be uploaded concurrently; transfer listeners are not documented as thread
+            // safe, so they only ever see one event at a time.
+            synchronized (progressLock) {
+                fireTransferProgress(event, buffer, read);
+            }
         }
     }
 
@@ -537,27 +583,15 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
     private void uploadInParts(File source, String destination, Resource resource) {
         long length = source.length();
         long partSize = partSizeFor(length);
+        int concurrency = multipartConcurrency();
         String uploadId = s3.createMultipartUpload(createMultipartUploadRequest(source, destination)).uploadId();
         fireTransferDebug("s3-wagon: multipart upload " + uploadId + " of " + length
-                + " bytes in parts of " + partSize);
+                + " bytes in parts of " + partSize + " with concurrency " + concurrency);
         try {
-            List<CompletedPart> parts = new ArrayList<>();
-            long offset = 0;
-            int partNumber = 1;
-            while (offset < length) {
-                long thisPart = Math.min(partSize, length - offset);
-                UploadPartRequest request = UploadPartRequest.builder()
-                        .bucket(bucket)
-                        .key(key(destination))
-                        .uploadId(uploadId)
-                        .partNumber(partNumber)
-                        .contentLength(thisPart)
-                        .build();
-                String eTag = s3.uploadPart(request, partBody(source, offset, thisPart, resource)).eTag();
-                parts.add(CompletedPart.builder().partNumber(partNumber).eTag(eTag).build());
-                offset += thisPart;
-                partNumber++;
-            }
+            int partCount = (int) ((length + partSize - 1) / partSize);
+            List<CompletedPart> parts = concurrency > 1
+                    ? uploadPartsInParallel(source, destination, resource, uploadId, partSize, partCount, concurrency)
+                    : uploadPartsSequentially(source, destination, resource, uploadId, partSize, partCount);
             s3.completeMultipartUpload(CompleteMultipartUploadRequest.builder()
                     .bucket(bucket)
                     .key(key(destination))
@@ -568,6 +602,77 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
             abortQuietly(destination, uploadId, e);
             throw e;
         }
+    }
+
+    private List<CompletedPart> uploadPartsSequentially(File source, String destination, Resource resource,
+            String uploadId, long partSize, int partCount) {
+        List<CompletedPart> parts = new ArrayList<>();
+        for (int partNumber = 1; partNumber <= partCount; partNumber++) {
+            parts.add(uploadSinglePart(source, destination, resource, uploadId, partSize, partNumber, source.length()));
+        }
+        return parts;
+    }
+
+    /**
+     * Uploads parts on a small pool.
+     *
+     * <p>Parts are independent, so the only shared state is the transfer listeners - and a Wagon's
+     * listeners are not documented as thread safe. {@link ProgressReportingInputStream} therefore
+     * serialises its events, which keeps listeners seeing one transfer at a time even though the
+     * bytes are going out on several connections.
+     */
+    private List<CompletedPart> uploadPartsInParallel(File source, String destination, Resource resource,
+            String uploadId, long partSize, int partCount, int concurrency) {
+        ExecutorService pool = Executors.newFixedThreadPool(Math.min(concurrency, partCount), runnable -> {
+            Thread thread = new Thread(runnable, "s3-wagon-upload");
+            thread.setDaemon(true);
+            return thread;
+        });
+        try {
+            List<Future<CompletedPart>> futures = new ArrayList<>();
+            for (int partNumber = 1; partNumber <= partCount; partNumber++) {
+                int part = partNumber;
+                futures.add(pool.submit(() ->
+                        uploadSinglePart(source, destination, resource, uploadId, partSize, part, source.length())));
+            }
+            List<CompletedPart> parts = new ArrayList<>();
+            for (Future<CompletedPart> future : futures) {
+                parts.add(awaitPart(future));
+            }
+            return parts;
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    private static CompletedPart awaitPart(Future<CompletedPart> future) {
+        try {
+            return future.get();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw SdkClientException.create("interrupted while uploading a part", e);
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof RuntimeException) {
+                throw (RuntimeException) cause;
+            }
+            throw SdkClientException.create("a part failed to upload", cause);
+        }
+    }
+
+    private CompletedPart uploadSinglePart(File source, String destination, Resource resource, String uploadId,
+            long partSize, int partNumber, long length) {
+        long offset = (partNumber - 1) * partSize;
+        long thisPart = Math.min(partSize, length - offset);
+        UploadPartRequest request = UploadPartRequest.builder()
+                .bucket(bucket)
+                .key(key(destination))
+                .uploadId(uploadId)
+                .partNumber(partNumber)
+                .contentLength(thisPart)
+                .build();
+        String eTag = s3.uploadPart(request, partBody(source, offset, thisPart, resource)).eTag();
+        return CompletedPart.builder().partNumber(partNumber).eTag(eTag).build();
     }
 
     private void abortQuietly(String destination, String uploadId, RuntimeException failure) {
@@ -623,6 +728,14 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
         }
         if (acl != null) {
             request.acl(acl);
+        }
+        String storageClass = storageClass();
+        if (storageClass != null) {
+            request.storageClass(storageClass);
+        }
+        String tags = objectTags();
+        if (tags != null) {
+            request.tagging(tags);
         }
         return request.build();
     }
@@ -755,6 +868,14 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
         }
         if (acl != null) {
             request.acl(acl);
+        }
+        String storageClass = storageClass();
+        if (storageClass != null) {
+            request.storageClass(storageClass);
+        }
+        String tags = objectTags();
+        if (tags != null) {
+            request.tagging(tags);
         }
         return request.build();
     }
