@@ -21,7 +21,6 @@ import software.amazon.awssdk.services.s3.model.*;
 import software.amazon.awssdk.services.sso.auth.ExpiredTokenException;
 
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
 import java.net.URI;
 
@@ -123,9 +122,10 @@ public final class S3Wagon extends AbstractWagon {
         PutObjectRequest putOb = PutObjectRequest.builder()
                 .bucket(bucket)
                 .key(key(destination))
+                .contentLength(source.length())
                 .build();
 
-        s3.putObject(putOb, RequestBody.fromBytes(getObjectFile(source)));
+        s3.putObject(putOb, RequestBody.fromFile(source.toPath()));
     }
 
     @Override
@@ -216,13 +216,4 @@ public final class S3Wagon extends AbstractWagon {
         }
     }
 
-    private static byte[] getObjectFile(File file) {
-        try (FileInputStream fileInputStream = new FileInputStream(file)) {
-            byte[] bytesArray = new byte[(int) file.length()];
-            fileInputStream.read(bytesArray);
-            return bytesArray;
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
-    }
 }
