@@ -3,6 +3,7 @@ package io.github.michalmela;
 import org.apache.maven.wagon.AbstractWagon;
 import org.apache.maven.wagon.ConnectionException;
 import org.apache.maven.wagon.ResourceDoesNotExistException;
+import org.apache.maven.wagon.StreamingWagon;
 import org.apache.maven.wagon.TransferFailedException;
 import org.apache.maven.wagon.authentication.AuthenticationInfo;
 import org.apache.maven.wagon.authorization.AuthorizationException;
@@ -36,9 +37,12 @@ import java.io.FileInputStream;
 import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.io.RandomAccessFile;
 import java.net.URI;
 import java.nio.channels.Channels;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -50,7 +54,7 @@ import java.util.function.Function;
 
 import static software.amazon.awssdk.utils.StringUtils.isNotBlank;
 
-public final class S3Wagon extends AbstractWagon {
+public final class S3Wagon extends AbstractWagon implements StreamingWagon {
 
     /** S3 accepts at most 10000 parts in a multipart upload. */
     private static final int MAX_PARTS = 10_000;
@@ -324,6 +328,36 @@ public final class S3Wagon extends AbstractWagon {
     public void get(String resourceName, File destination) throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
         Resource resource = new Resource(resourceName);
         this.fireGetInitiated(resource, destination);
+        download(resourceName, resource, destination, null);
+    }
+
+    /**
+     * Downloads straight into a stream, which is what the resolver asks for when it wants the bytes
+     * in memory rather than on disk - checksums, mostly. Without this it falls back to the
+     * file-based path and writes a temporary file for every one of them.
+     */
+    @Override
+    public void getToStream(String resourceName, OutputStream stream)
+            throws ResourceDoesNotExistException, TransferFailedException, AuthorizationException {
+        Resource resource = new Resource(resourceName);
+        this.fireGetInitiated(resource, null);
+        download(resourceName, resource, null, stream);
+    }
+
+    @Override
+    public boolean getIfNewerToStream(String resourceName, OutputStream stream, long timestamp)
+            throws ResourceDoesNotExistException, TransferFailedException, AuthorizationException {
+        if (timestamp == 0 || isNewer(resourceName, timestamp)) {
+            getToStream(resourceName, stream);
+            return true;
+        }
+        return false;
+    }
+
+    /** Exactly one of {@code destination} and {@code stream} is non-null. */
+    private void download(String resourceName, Resource resource, File destination, OutputStream stream)
+            throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
+        fireTransferDebug("fetching s3://" + bucket + "/" + key(resourceName));
         try {
             GetObjectRequest objectRequest = GetObjectRequest
                     .builder()
@@ -333,7 +367,11 @@ public final class S3Wagon extends AbstractWagon {
             try (ResponseInputStream<GetObjectResponse> is = s3.getObject(objectRequest)) {
                 describe(resource, is.response());
                 // getTransfer fires started/progress/completed itself.
-                this.getTransfer(resource, destination, is);
+                if (destination != null) {
+                    this.getTransfer(resource, destination, is);
+                } else {
+                    this.getTransfer(resource, stream, is);
+                }
             }
         } catch (SdkException e) {
             this.fireTransferError(resource, e, TransferEvent.REQUEST_GET);
@@ -597,11 +635,85 @@ public final class S3Wagon extends AbstractWagon {
         }
     }
 
+    /**
+     * Uploads straight from a stream, the counterpart of {@link #getToStream}. The resolver uses it
+     * for content it holds in memory rather than in a file - checksums during a deploy.
+     *
+     * <p>A stream cannot be re-read, so an upload big enough to need multiple parts is spooled to a
+     * temporary file first and handed to the ordinary multipart path. Everything below the
+     * threshold - which is all the resolver ever sends this way - goes straight out.
+     */
+    @Override
+    public void putFromStream(InputStream stream, String destination)
+            throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
+        putFromStream(stream, destination, -1, -1);
+    }
+
+    @Override
+    public void putFromStream(InputStream stream, String destination, long contentLength, long lastModified)
+            throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
+        Resource resource = new Resource(destination);
+        resource.setContentLength(contentLength);
+        resource.setLastModified(lastModified);
+        this.firePutInitiated(resource, null);
+
+        if (contentLength < 0 || contentLength > multipartThreshold()) {
+            spoolAndPut(stream, destination, resource);
+            return;
+        }
+        try {
+            this.firePutStarted(resource, null);
+            fireTransferDebug("uploading " + contentLength + " bytes to s3://" + bucket + "/" + key(destination));
+            s3.putObject(putObjectRequest(destination, contentLength),
+                    RequestBody.fromContentProvider(
+                            () -> new ProgressReportingInputStream(stream, resource),
+                            contentLength,
+                            "application/octet-stream"));
+            this.firePutCompleted(resource, null);
+        } catch (SdkException e) {
+            this.fireTransferError(resource, e, TransferEvent.REQUEST_PUT);
+            throw uploadFailure(destination, e);
+        }
+    }
+
+    /** Streams cannot be re-read, so anything needing multipart goes through a temporary file. */
+    private void spoolAndPut(InputStream stream, String destination, Resource resource)
+            throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
+        File spooled = null;
+        try {
+            spooled = File.createTempFile("s3-wagon-upload", ".tmp");
+            Files.copy(stream, spooled.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            put(spooled, destination);
+        } catch (IOException e) {
+            this.fireTransferError(resource, e, TransferEvent.REQUEST_PUT);
+            throw new TransferFailedException("Could not buffer " + destination + " for upload", e);
+        } finally {
+            if (spooled != null && !spooled.delete()) {
+                spooled.deleteOnExit();
+            }
+        }
+    }
+
+    private TransferFailedException uploadFailure(String destination, SdkException e)
+            throws ResourceDoesNotExistException, AuthorizationException {
+        if (isMissing(e)) {
+            throw new ResourceDoesNotExistException("bucket " + bucket + " not found in S3", e);
+        }
+        if (isAuthorizationFailure(e)) {
+            throw new AuthorizationException("Not authorized to write " + destination + " to S3", e);
+        }
+        return new TransferFailedException("Transfer of " + destination + " to S3 failed", e);
+    }
+
     private PutObjectRequest putObjectRequest(File source, String destination) {
+        return putObjectRequest(destination, source.length());
+    }
+
+    private PutObjectRequest putObjectRequest(String destination, long contentLength) {
         PutObjectRequest.Builder request = PutObjectRequest.builder()
                 .bucket(bucket)
                 .key(key(destination))
-                .contentLength(source.length());
+                .contentLength(contentLength);
         if (encryption != null) {
             request.serverSideEncryption(encryption);
         }
