@@ -157,7 +157,7 @@ public final class S3Wagon extends AbstractWagon {
     private boolean isNewer(String resourceName, long timestamp) throws ResourceDoesNotExistException, AuthorizationException, TransferFailedException {
         try {
             HeadObjectResponse headObject = headObject(resourceName);
-            return headObject.lastModified().getEpochSecond() > timestamp;
+            return headObject.lastModified().toEpochMilli() > timestamp;
         } catch (SdkException e) {
             if (isMissing(e)) {
                 throw new ResourceDoesNotExistException(resourceName + " not found in S3", e);
