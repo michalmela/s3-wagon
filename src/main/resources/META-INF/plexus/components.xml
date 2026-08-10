@@ -6,5 +6,11 @@
             <implementation>io.github.michalmela.S3Wagon</implementation>
             <instantiation-strategy>per-lookup</instantiation-strategy>
         </component>
+        <component>
+            <role>org.apache.maven.wagon.Wagon</role>
+            <role-hint>s3</role-hint>
+            <implementation>io.github.michalmela.S3Wagon</implementation>
+            <instantiation-strategy>per-lookup</instantiation-strategy>
+        </component>
     </components>
 </component-set>
