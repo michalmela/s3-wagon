@@ -5,7 +5,11 @@ import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectResponse;
+import software.amazon.awssdk.services.s3.model.CommonPrefix;
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
+import software.amazon.awssdk.services.s3.model.S3Object;
 import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
 import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
@@ -39,6 +43,7 @@ final class FakeS3Client implements S3Client {
     private final List<GetObjectRequest> getRequests = new ArrayList<>();
     private final List<PutObjectRequest> putRequests = new ArrayList<>();
     private final List<HeadObjectRequest> headRequests = new ArrayList<>();
+    private final List<ListObjectsV2Request> listRequests = new ArrayList<>();
     private final List<byte[]> putBodies = new ArrayList<>();
     private final List<String> putBodyContentTypes = new ArrayList<>();
 
@@ -100,6 +105,10 @@ final class FakeS3Client implements S3Client {
     /** The content type the wagon put on the upload body. */
     String lastPutBodyContentType() {
         return last(putBodyContentTypes);
+    }
+
+    int listRequestCount() {
+        return listRequests.size();
     }
 
     int putCount() {
@@ -164,6 +173,63 @@ final class FakeS3Client implements S3Client {
                 .contentLength((long) bytes.length)
                 .lastModified(lastModified.get(request.key()))
                 .build();
+    }
+
+    /** Page size for listings, so the pagination loop can be exercised. */
+    private int listPageSize = 1000;
+
+    void listPageSize(int listPageSize) {
+        this.listPageSize = listPageSize;
+    }
+
+    @Override
+    public ListObjectsV2Response listObjectsV2(ListObjectsV2Request request) {
+        listRequests.add(request);
+        throwIfFailing();
+        String prefix = request.prefix() == null ? "" : request.prefix();
+        String delimiter = request.delimiter();
+
+        java.util.TreeSet<String> keys = new java.util.TreeSet<>();
+        for (String key : content.keySet()) {
+            if (key.startsWith(prefix)) {
+                keys.add(key);
+            }
+        }
+
+        // Split into direct objects and rolled-up prefixes, the way S3 does with a delimiter.
+        java.util.TreeSet<String> objects = new java.util.TreeSet<>();
+        java.util.TreeSet<String> prefixes = new java.util.TreeSet<>();
+        for (String key : keys) {
+            String rest = key.substring(prefix.length());
+            int boundary = delimiter == null ? -1 : rest.indexOf(delimiter);
+            if (boundary < 0) {
+                objects.add(key);
+            } else {
+                prefixes.add(prefix + rest.substring(0, boundary + delimiter.length()));
+            }
+        }
+
+        List<String> ordered = new ArrayList<>(objects);
+        int from = request.continuationToken() == null ? 0 : Integer.parseInt(request.continuationToken());
+        int to = Math.min(from + listPageSize, ordered.size());
+        boolean truncated = to < ordered.size();
+
+        ListObjectsV2Response.Builder response = ListObjectsV2Response.builder()
+                .contents(ordered.subList(from, to).stream()
+                        .map(k -> S3Object.builder().key(k).size((long) content.get(k).length).build())
+                        .collect(java.util.stream.Collectors.toList()))
+                .isTruncated(truncated);
+        if (truncated) {
+            response.nextContinuationToken(String.valueOf(to));
+        }
+        // S3 repeats the common prefixes on every page; only the first page carries them here,
+        // which is enough to prove the wagon does not lose or duplicate them.
+        if (from == 0) {
+            response.commonPrefixes(prefixes.stream()
+                    .map(p -> CommonPrefix.builder().prefix(p).build())
+                    .collect(java.util.stream.Collectors.toList()));
+        }
+        return response.build();
     }
 
     private void throwIfFailing() {

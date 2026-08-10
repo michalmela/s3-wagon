@@ -34,9 +34,11 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.function.Function;
 
@@ -559,6 +561,66 @@ public final class S3Wagon extends AbstractWagon {
             }
         }
         return hosts;
+    }
+
+    /**
+     * Lists the immediate children of a directory, the way the other wagons do: plain names for
+     * objects, and names ending in "/" for the prefixes below it.
+     *
+     * <p>{@link AbstractWagon} would otherwise throw {@link UnsupportedOperationException} - an
+     * unchecked exception escaping the Wagon contract - at anything that browses a repository.
+     */
+    @Override
+    public List<String> getFileList(String destinationDirectory)
+            throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
+        String prefix = directoryPrefix(destinationDirectory);
+        try {
+            List<String> names = new ArrayList<>();
+            String continuationToken = null;
+            do {
+                ListObjectsV2Response response = s3.listObjectsV2(ListObjectsV2Request.builder()
+                        .bucket(bucket)
+                        .prefix(prefix)
+                        .delimiter("/")
+                        .continuationToken(continuationToken)
+                        .build());
+                for (CommonPrefix commonPrefix : response.commonPrefixes()) {
+                    names.add(relativeName(prefix, commonPrefix.prefix()));
+                }
+                for (S3Object object : response.contents()) {
+                    // A "directory marker" object is the prefix itself; it is not a child.
+                    if (!object.key().equals(prefix)) {
+                        names.add(relativeName(prefix, object.key()));
+                    }
+                }
+                continuationToken = Boolean.TRUE.equals(response.isTruncated())
+                        ? response.nextContinuationToken()
+                        : null;
+            } while (continuationToken != null);
+
+            if (names.isEmpty()) {
+                throw new ResourceDoesNotExistException(destinationDirectory + " not found in S3");
+            }
+            return names;
+        } catch (SdkException e) {
+            if (isMissing(e)) {
+                throw new ResourceDoesNotExistException(destinationDirectory + " not found in S3", e);
+            }
+            if (isAuthorizationFailure(e)) {
+                throw new AuthorizationException("Not authorized to list " + destinationDirectory + " in S3", e);
+            }
+            throw new TransferFailedException("Listing of " + destinationDirectory + " in S3 failed", e);
+        }
+    }
+
+    /** A listing prefix is a key that must end with "/" so the delimiter can do its job. */
+    private String directoryPrefix(String destinationDirectory) {
+        String prefix = key(destinationDirectory);
+        return prefix.isEmpty() || prefix.endsWith("/") ? prefix : prefix + "/";
+    }
+
+    private static String relativeName(String prefix, String key) {
+        return key.substring(prefix.length());
     }
 
     @Override
