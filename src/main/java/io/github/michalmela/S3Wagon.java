@@ -10,6 +10,10 @@ import org.apache.maven.wagon.events.TransferEvent;
 import org.apache.maven.wagon.proxy.ProxyInfo;
 import org.apache.maven.wagon.resource.Resource;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.AwsCredentials;
+import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
+import software.amazon.awssdk.auth.credentials.AwsSessionCredentials;
+import software.amazon.awssdk.auth.credentials.ProfileCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.awscore.exception.AwsServiceException;
 import software.amazon.awssdk.core.ResponseInputStream;
@@ -82,6 +86,8 @@ public final class S3Wagon extends AbstractWagon {
     private String requestChecksumCalculation;
     private String multipartThreshold;
     private String multipartPartSize;
+    private String sessionToken;
+    private String profile;
 
     /** Overridden by tests; environment variables cannot be set in-process. */
     private Function<String, String> environment = System::getenv;
@@ -151,6 +157,14 @@ public final class S3Wagon extends AbstractWagon {
         this.multipartPartSize = multipartPartSize;
     }
 
+    public void setSessionToken(String sessionToken) {
+        this.sessionToken = sessionToken;
+    }
+
+    public void setProfile(String profile) {
+        this.profile = profile;
+    }
+
     void setEnvironment(Function<String, String> environment) {
         this.environment = environment;
     }
@@ -178,6 +192,14 @@ public final class S3Wagon extends AbstractWagon {
     String requestChecksumCalculation() {
         return setting(requestChecksumCalculation,
                 "s3wagon.requestChecksumCalculation", "S3WAGON_REQUEST_CHECKSUM_CALCULATION");
+    }
+
+    String sessionToken() {
+        return setting(sessionToken, "s3wagon.sessionToken", "S3WAGON_SESSION_TOKEN");
+    }
+
+    String profile() {
+        return setting(profile, "s3wagon.profile", "S3WAGON_PROFILE");
     }
 
     long multipartThreshold() {
@@ -668,8 +690,9 @@ public final class S3Wagon extends AbstractWagon {
 
     private S3Client s3(AuthenticationInfo authenticationInfo, SdkHttpClient httpClient) throws ConnectionException {
         S3ClientBuilder s3 = S3Client.builder().httpClient(httpClient);
-        if (hasMinimumRequiredFields(authenticationInfo)) {
-            s3.credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(authenticationInfo.getUserName(), authenticationInfo.getPassword())));
+        AwsCredentialsProvider credentials = credentialsProvider(authenticationInfo);
+        if (credentials != null) {
+            s3.credentialsProvider(credentials);
         }
         String region = region();
         if (region != null) {
@@ -696,6 +719,31 @@ public final class S3Wagon extends AbstractWagon {
                     + " but was \"" + endpoint + "\"");
         }
         return uri;
+    }
+
+    /**
+     * Credentials from settings.xml win, then a named profile, then the SDK's default chain.
+     *
+     * <p>Returning null leaves the builder alone so the default chain applies - which is what makes
+     * {@code aws sso login} work without exporting anything.
+     */
+    AwsCredentialsProvider credentialsProvider(AuthenticationInfo authenticationInfo) {
+        if (hasMinimumRequiredFields(authenticationInfo)) {
+            String token = sessionToken();
+            AwsCredentials credentials = token != null
+                    ? AwsSessionCredentials.create(
+                            authenticationInfo.getUserName(), authenticationInfo.getPassword(), token)
+                    : AwsBasicCredentials.create(
+                            authenticationInfo.getUserName(), authenticationInfo.getPassword());
+            return StaticCredentialsProvider.create(credentials);
+        }
+        String profile = profile();
+        if (profile != null) {
+            // Role assumption configured in ~/.aws/config resolves through this too, which is why
+            // the STS module is on the classpath.
+            return ProfileCredentialsProvider.create(profile);
+        }
+        return null;
     }
 
     private static boolean hasMinimumRequiredFields(AuthenticationInfo authenticationInfo) {
