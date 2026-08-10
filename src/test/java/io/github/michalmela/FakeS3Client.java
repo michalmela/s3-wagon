@@ -5,7 +5,16 @@ import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectResponse;
+import software.amazon.awssdk.services.s3.model.AbortMultipartUploadRequest;
+import software.amazon.awssdk.services.s3.model.AbortMultipartUploadResponse;
 import software.amazon.awssdk.services.s3.model.CommonPrefix;
+import software.amazon.awssdk.services.s3.model.CompleteMultipartUploadRequest;
+import software.amazon.awssdk.services.s3.model.CompleteMultipartUploadResponse;
+import software.amazon.awssdk.services.s3.model.CompletedPart;
+import software.amazon.awssdk.services.s3.model.CreateMultipartUploadRequest;
+import software.amazon.awssdk.services.s3.model.CreateMultipartUploadResponse;
+import software.amazon.awssdk.services.s3.model.UploadPartRequest;
+import software.amazon.awssdk.services.s3.model.UploadPartResponse;
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
@@ -105,6 +114,10 @@ final class FakeS3Client implements S3Client {
     /** The content type the wagon put on the upload body. */
     String lastPutBodyContentType() {
         return last(putBodyContentTypes);
+    }
+
+    byte[] objectContent(String key) {
+        return content.get(key);
     }
 
     int listRequestCount() {
@@ -230,6 +243,79 @@ final class FakeS3Client implements S3Client {
                     .collect(java.util.stream.Collectors.toList()));
         }
         return response.build();
+    }
+
+    // ---- multipart ----
+
+    private final Map<String, List<byte[]>> uploadedParts = new java.util.LinkedHashMap<>();
+    private final List<CreateMultipartUploadRequest> createMultipartRequests = new ArrayList<>();
+    private final List<UploadPartRequest> uploadPartRequests = new ArrayList<>();
+    private boolean aborted;
+    private boolean completed;
+    private int failUploadPartNumber = -1;
+
+    /** Makes the given part fail, to exercise the abort path. */
+    void failUploadPart(int partNumber) {
+        this.failUploadPartNumber = partNumber;
+    }
+
+    boolean isAborted() {
+        return aborted;
+    }
+
+    boolean isMultipartCompleted() {
+        return completed;
+    }
+
+    CreateMultipartUploadRequest lastCreateMultipartRequest() {
+        return last(createMultipartRequests);
+    }
+
+    List<UploadPartRequest> uploadPartRequests() {
+        return uploadPartRequests;
+    }
+
+    @Override
+    public CreateMultipartUploadResponse createMultipartUpload(CreateMultipartUploadRequest request) {
+        createMultipartRequests.add(request);
+        throwIfFailing();
+        String uploadId = "upload-" + createMultipartRequests.size();
+        uploadedParts.put(uploadId, new ArrayList<>());
+        return CreateMultipartUploadResponse.builder().uploadId(uploadId).build();
+    }
+
+    @Override
+    public UploadPartResponse uploadPart(UploadPartRequest request, RequestBody body) {
+        uploadPartRequests.add(request);
+        throwIfFailing();
+        byte[] part = readFully(body);
+        if (request.partNumber() == failUploadPartNumber) {
+            throw software.amazon.awssdk.core.exception.SdkClientException.create(
+                    "part " + request.partNumber() + " failed");
+        }
+        uploadedParts.get(request.uploadId()).add(part);
+        return UploadPartResponse.builder().eTag("etag-" + request.partNumber()).build();
+    }
+
+    @Override
+    public CompleteMultipartUploadResponse completeMultipartUpload(CompleteMultipartUploadRequest request) {
+        throwIfFailing();
+        ByteArrayOutputStream assembled = new ByteArrayOutputStream();
+        for (CompletedPart part : request.multipartUpload().parts()) {
+            byte[] bytes = uploadedParts.get(request.uploadId()).get(part.partNumber() - 1);
+            assembled.write(bytes, 0, bytes.length);
+        }
+        content.put(request.key(), assembled.toByteArray());
+        lastModified.put(request.key(), Instant.EPOCH);
+        completed = true;
+        return CompleteMultipartUploadResponse.builder().build();
+    }
+
+    @Override
+    public AbortMultipartUploadResponse abortMultipartUpload(AbortMultipartUploadRequest request) {
+        aborted = true;
+        uploadedParts.remove(request.uploadId());
+        return AbortMultipartUploadResponse.builder().build();
     }
 
     private void throwIfFailing() {

@@ -32,7 +32,9 @@ import java.io.FileInputStream;
 import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.RandomAccessFile;
 import java.net.URI;
+import java.nio.channels.Channels;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -45,6 +47,17 @@ import java.util.function.Function;
 import static software.amazon.awssdk.utils.StringUtils.isNotBlank;
 
 public final class S3Wagon extends AbstractWagon {
+
+    /** S3 accepts at most 10000 parts in a multipart upload. */
+    private static final int MAX_PARTS = 10_000;
+
+    /** Artifacts bigger than this are uploaded in parts. */
+    private static final long DEFAULT_MULTIPART_THRESHOLD = 100L * 1024 * 1024;
+
+    private static final long DEFAULT_MULTIPART_PART_SIZE = 16L * 1024 * 1024;
+
+    /** S3 rejects parts smaller than 5MB, except for the last one. */
+    private static final long MINIMUM_PART_SIZE = 5L * 1024 * 1024;
 
     private S3Client s3;
 
@@ -67,6 +80,8 @@ public final class S3Wagon extends AbstractWagon {
     private String sseKmsKeyId;
     private String cannedAcl;
     private String requestChecksumCalculation;
+    private String multipartThreshold;
+    private String multipartPartSize;
 
     /** Overridden by tests; environment variables cannot be set in-process. */
     private Function<String, String> environment = System::getenv;
@@ -93,6 +108,7 @@ public final class S3Wagon extends AbstractWagon {
             this.encryption = encryption(serverSideEncryption());
             this.acl = cannedAcl(cannedAcl());
             this.checksumCalculation = checksumCalculation(requestChecksumCalculation());
+            validateSizes();
             this.s3 = injectedClient != null
                     ? injectedClient
                     : s3(authenticationInfo, awsHttpClient(getProxyInfo()));
@@ -127,6 +143,14 @@ public final class S3Wagon extends AbstractWagon {
         this.requestChecksumCalculation = requestChecksumCalculation;
     }
 
+    public void setMultipartThreshold(String multipartThreshold) {
+        this.multipartThreshold = multipartThreshold;
+    }
+
+    public void setMultipartPartSize(String multipartPartSize) {
+        this.multipartPartSize = multipartPartSize;
+    }
+
     void setEnvironment(Function<String, String> environment) {
         this.environment = environment;
     }
@@ -154,6 +178,31 @@ public final class S3Wagon extends AbstractWagon {
     String requestChecksumCalculation() {
         return setting(requestChecksumCalculation,
                 "s3wagon.requestChecksumCalculation", "S3WAGON_REQUEST_CHECKSUM_CALCULATION");
+    }
+
+    long multipartThreshold() {
+        return bytes(setting(multipartThreshold, "s3wagon.multipartThreshold", "S3WAGON_MULTIPART_THRESHOLD"),
+                DEFAULT_MULTIPART_THRESHOLD);
+    }
+
+    long multipartPartSize() {
+        return Math.max(MINIMUM_PART_SIZE,
+                bytes(setting(multipartPartSize, "s3wagon.multipartPartSize", "S3WAGON_MULTIPART_PART_SIZE"),
+                        DEFAULT_MULTIPART_PART_SIZE));
+    }
+
+    private static long bytes(String value, long fallback) {
+        return value == null ? fallback : Long.parseLong(value.trim());
+    }
+
+    /** Parsed up front so a malformed size fails on connect rather than on the first big deploy. */
+    private void validateSizes() throws ConnectionException {
+        try {
+            multipartThreshold();
+            multipartPartSize();
+        } catch (NumberFormatException e) {
+            throw new ConnectionException("multipartThreshold and multipartPartSize must be a number of bytes", e);
+        }
     }
 
     /**
@@ -293,9 +342,12 @@ public final class S3Wagon extends AbstractWagon {
             throw e;
         }
         try {
-            PutObjectRequest putOb = putObjectRequest(source, destination);
             this.firePutStarted(resource, source);
-            s3.putObject(putOb, progressReporting(source, resource));
+            if (source.length() > multipartThreshold()) {
+                uploadInParts(source, destination, resource);
+            } else {
+                s3.putObject(putObjectRequest(source, destination), progressReporting(source, resource));
+            }
             this.firePutCompleted(resource, source);
         } catch (SdkException e) {
             this.fireTransferError(resource, e, TransferEvent.REQUEST_PUT);
@@ -380,6 +432,146 @@ public final class S3Wagon extends AbstractWagon {
         }
         if (response.lastModified() != null) {
             resource.setLastModified(response.lastModified().toEpochMilli());
+        }
+    }
+
+    /**
+     * Uploads a large artifact as a multipart upload.
+     *
+     * <p>A single PutObject is capped at 5GB by S3, so anything bigger cannot be uploaded any other
+     * way. Parts are sent sequentially: a Wagon's transfer listeners are not documented as thread
+     * safe, so uploading parts in parallel would need its own progress accounting.
+     *
+     * <p>A failed upload is aborted so the bucket is not left paying for orphaned parts.
+     */
+    private void uploadInParts(File source, String destination, Resource resource) {
+        long length = source.length();
+        long partSize = partSizeFor(length);
+        String uploadId = s3.createMultipartUpload(createMultipartUploadRequest(source, destination)).uploadId();
+        try {
+            List<CompletedPart> parts = new ArrayList<>();
+            long offset = 0;
+            int partNumber = 1;
+            while (offset < length) {
+                long thisPart = Math.min(partSize, length - offset);
+                UploadPartRequest request = UploadPartRequest.builder()
+                        .bucket(bucket)
+                        .key(key(destination))
+                        .uploadId(uploadId)
+                        .partNumber(partNumber)
+                        .contentLength(thisPart)
+                        .build();
+                String eTag = s3.uploadPart(request, partBody(source, offset, thisPart, resource)).eTag();
+                parts.add(CompletedPart.builder().partNumber(partNumber).eTag(eTag).build());
+                offset += thisPart;
+                partNumber++;
+            }
+            s3.completeMultipartUpload(CompleteMultipartUploadRequest.builder()
+                    .bucket(bucket)
+                    .key(key(destination))
+                    .uploadId(uploadId)
+                    .multipartUpload(CompletedMultipartUpload.builder().parts(parts).build())
+                    .build());
+        } catch (RuntimeException e) {
+            abortQuietly(destination, uploadId, e);
+            throw e;
+        }
+    }
+
+    private void abortQuietly(String destination, String uploadId, RuntimeException failure) {
+        try {
+            s3.abortMultipartUpload(AbortMultipartUploadRequest.builder()
+                    .bucket(bucket)
+                    .key(key(destination))
+                    .uploadId(uploadId)
+                    .build());
+        } catch (RuntimeException e) {
+            // The upload already failed; losing the abort as well must not hide the real cause.
+            failure.addSuppressed(e);
+        }
+    }
+
+    /**
+     * S3 allows at most 10000 parts, so the configured size is raised when a file would need more.
+     */
+    long partSizeFor(long length) {
+        long partSize = multipartPartSize();
+        long minimum = (length + MAX_PARTS - 1) / MAX_PARTS;
+        return Math.max(partSize, minimum);
+    }
+
+    private RequestBody partBody(File source, long offset, long length, Resource resource) {
+        return RequestBody.fromContentProvider(
+                () -> new ProgressReportingInputStream(openPart(source, offset, length), resource),
+                length,
+                "application/octet-stream");
+    }
+
+    private static InputStream openPart(File source, long offset, long length) {
+        try {
+            RandomAccessFile file = new RandomAccessFile(source, "r");
+            file.seek(offset);
+            return new BoundedInputStream(new BufferedInputStream(Channels.newInputStream(file.getChannel())), length);
+        } catch (IOException e) {
+            throw SdkClientException.create("Could not read " + source, e);
+        }
+    }
+
+    private CreateMultipartUploadRequest createMultipartUploadRequest(File source, String destination) {
+        CreateMultipartUploadRequest.Builder request = CreateMultipartUploadRequest.builder()
+                .bucket(bucket)
+                .key(key(destination))
+                .contentType(RequestBody.fromFile(source.toPath()).contentType());
+        if (encryption != null) {
+            request.serverSideEncryption(encryption);
+        }
+        String kmsKeyId = sseKmsKeyId();
+        if (kmsKeyId != null) {
+            request.ssekmsKeyId(kmsKeyId);
+        }
+        if (acl != null) {
+            request.acl(acl);
+        }
+        return request.build();
+    }
+
+    /** Reads at most a fixed number of bytes, so one part cannot run into the next. */
+    private static final class BoundedInputStream extends FilterInputStream {
+
+        private long remaining;
+
+        private BoundedInputStream(InputStream in, long limit) {
+            super(in);
+            this.remaining = limit;
+        }
+
+        @Override
+        public int read() throws IOException {
+            if (remaining <= 0) {
+                return -1;
+            }
+            int read = super.read();
+            if (read != -1) {
+                remaining--;
+            }
+            return read;
+        }
+
+        @Override
+        public int read(byte[] buffer, int offset, int length) throws IOException {
+            if (remaining <= 0) {
+                return -1;
+            }
+            int read = super.read(buffer, offset, (int) Math.min(length, remaining));
+            if (read > 0) {
+                remaining -= read;
+            }
+            return read;
+        }
+
+        @Override
+        public int available() throws IOException {
+            return (int) Math.min(super.available(), remaining);
         }
     }
 
