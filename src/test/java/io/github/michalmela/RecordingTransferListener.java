@@ -2,6 +2,7 @@ package io.github.michalmela;
 
 import org.apache.maven.wagon.events.TransferEvent;
 import org.apache.maven.wagon.events.TransferListener;
+import org.apache.maven.wagon.resource.Resource;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -13,9 +14,15 @@ final class RecordingTransferListener implements TransferListener {
     private final List<String> events = new ArrayList<>();
     private long bytesReported;
     private Exception error;
+    private Resource completedResource;
 
     List<String> events() {
         return events;
+    }
+
+    /** The resource as it looked when the transfer completed. */
+    Resource completedResource() {
+        return completedResource;
     }
 
     long bytesReported() {
@@ -51,6 +58,7 @@ final class RecordingTransferListener implements TransferListener {
     @Override
     public void transferCompleted(TransferEvent event) {
         events.add("completed");
+        completedResource = event.getResource();
     }
 
     @Override

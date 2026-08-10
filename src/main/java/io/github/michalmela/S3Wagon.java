@@ -107,6 +107,7 @@ public final class S3Wagon extends AbstractWagon {
                     .bucket(bucket)
                     .build();
             try (ResponseInputStream<GetObjectResponse> is = s3.getObject(objectRequest)) {
+                describe(resource, is.response());
                 // getTransfer fires started/progress/completed itself.
                 this.getTransfer(resource, destination, is);
             }
@@ -210,6 +211,20 @@ public final class S3Wagon extends AbstractWagon {
             TransferEvent event = new TransferEvent(
                     S3Wagon.this, resource, TransferEvent.TRANSFER_PROGRESS, TransferEvent.REQUEST_PUT);
             fireTransferProgress(event, buffer, read);
+        }
+    }
+
+    /**
+     * Copies the object metadata onto the resource, so that transfer listeners can report the size
+     * of a download and callers can see how old it is. Without this the listeners are handed an
+     * unknown content length and progress output is degraded.
+     */
+    private static void describe(Resource resource, GetObjectResponse response) {
+        if (response.contentLength() != null) {
+            resource.setContentLength(response.contentLength());
+        }
+        if (response.lastModified() != null) {
+            resource.setLastModified(response.lastModified().toEpochMilli());
         }
     }
 
