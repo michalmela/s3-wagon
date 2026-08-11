@@ -95,22 +95,39 @@ Releases are signed. Generating the key is a one-off:
 
 ```sh
 gpg --quick-generate-key "Your Name <you@example.com>" rsa4096 sign 2y
-gpg --list-secret-keys --keyid-format=long        # the id follows rsa4096/
 ```
 
-The private key and its passphrase go into repository secrets. Piping avoids putting the key in
-shell history:
+GnuPG identifies that key three ways, which is worth knowing because different commands want
+different ones:
+
+| | Looks like | Where it comes from |
+|---|---|---|
+| Fingerprint | 40 hex characters | `gpg --fingerprint`; the unambiguous identifier |
+| Key ID | the last 16 hex characters of the fingerprint | shown after `rsa4096/` in `--list-keys` |
+| User ID | `Your Name <you@example.com>` | whatever you typed when generating |
+
+Any of them works in most commands. Rather than copying hex around, put the fingerprint in a shell
+variable once and use it throughout:
 
 ```sh
-gpg --armor --export-secret-keys YOUR_KEY_ID | gh secret set GPG_PRIVATE_KEY
+FPR=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr/{print $10; exit}')
+echo "$FPR"
+```
+
+The private key and its passphrase then go into repository secrets. Piping avoids putting the key
+in shell history:
+
+```sh
+gpg --armor --export-secret-keys "$FPR" | gh secret set GPG_PRIVATE_KEY
 gh secret set GPG_PASSPHRASE                      # prompts on stdin
 ```
 
 Exporting asks for the passphrase; that prompt is interactive, so run it in a terminal rather than
-from a script. Publish the public half so signatures can be checked by anyone:
+from a script — non-interactively it fails silently and exports nothing. Publish the public half so
+signatures can be checked by anyone:
 
 ```sh
-gpg --keyserver keyserver.ubuntu.com --send-keys YOUR_KEY_ID
+gpg --keyserver keyserver.ubuntu.com --send-keys "$FPR"
 ```
 
 The `2y` sets the **key's** expiry, not the signature's. The difference matters:
@@ -122,10 +139,17 @@ The `2y` sets the **key's** expiry, not the signature's. The difference matters:
 Expiry is a dead-man's switch rather than a deadline, and it is extendable at any time:
 
 ```sh
-gpg --quick-set-expire YOUR_FINGERPRINT 2y
-gpg --keyserver keyserver.ubuntu.com --send-keys YOUR_KEY_ID   # publish the new expiry
-gpg --armor --export-secret-keys YOUR_KEY_ID | gh secret set GPG_PRIVATE_KEY
+FPR=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr/{print $10; exit}')
+gpg --quick-set-expire "$FPR" 2y
+gpg --keyserver keyserver.ubuntu.com --send-keys "$FPR"        # publish the new expiry
+gpg --armor --export-secret-keys "$FPR" | gh secret set GPG_PRIVATE_KEY
 ```
+
+Both `--quick-set-expire` and `--export-secret-keys` unlock the key, so both prompt for the
+passphrase — run them in a terminal, not from a script.
+
+That last line is the one people forget: the secret holds a copy of the key as it was when
+exported, so extending the expiry locally without re-exporting leaves CI signing with the old one.
 
 So that nobody discovers this the hard way, the release workflow checks the key before signing: it
 warns when fewer than 60 days remain and fails outright once the key has expired, naming the command
