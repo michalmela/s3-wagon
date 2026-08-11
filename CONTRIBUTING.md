@@ -208,6 +208,25 @@ Everything found is reported to the repository's Security tab. High and critical
 (CVSS >= 7.0) fail the build; anything lower is reported without blocking, so a red build stays
 worth reacting to. That threshold lives in `mise-tasks/scan/gate`.
 
+## Testing the workflows before pushing
+
+Three levels, cheapest first:
+
+```sh
+mise run lint          # actionlint: syntax and expressions, instant
+mise run ci:dryrun     # act: does every action reference resolve to something runnable?
+mise run ci:local -- -j Verify   # act: actually run a job on Linux
+```
+
+The middle one exists because of a real failure: `actionlint` passed a workflow whose action
+reference pointed at a repository root with no `runs:` section, and it only broke once GitHub tried
+to run it. A dry run catches that in milliseconds.
+
+Neither can reproduce everything. Pages deployment, OIDC-signed Scorecard publishing, code-scanning
+uploads, release-please and the Clojars deploy all need the real GitHub. And for shell-portability
+bugs a container is more decisive than act — `sh` on the runner is dash, which rejects
+`set -o pipefail`, so an inline mise task without a bash shebang fails there and nowhere on macOS.
+
 ## Repository settings these workflows expect
 
 Two workflows are wired up but depend on a setting only a repository admin can flip:

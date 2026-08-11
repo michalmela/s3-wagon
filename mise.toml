@@ -1,4 +1,5 @@
 [tools]
+act = "0.2.87"
 actionlint = "1.7.12"
 "aqua:sharkdp/hyperfine" = "1.20.0"
 # The second JDK is only used by verify:java8, which checks that the artifact
@@ -86,6 +87,30 @@ release-please release-pr \
   --target-branch="${MISE_RELEASE_BRANCH:-master}" \
   --dry-run
 """
+
+[tasks."ci:dryrun"]
+description = "Check every workflow resolves its actions, without running them"
+# actionlint validates syntax but cannot know whether an action reference points
+# at something executable. A wrong reference is what broke the vulnerability
+# workflow: osv-scanner-action is a monorepo and the root has no runs: section.
+# act's dry run resolves each action and fails on exactly that, in milliseconds.
+# Not part of lint, because the first run clones the actions it references.
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+for workflow in .github/workflows/*.yml; do
+  echo "==> $workflow"
+  act --workflows "$workflow" --dryrun --list >/dev/null
+  act --workflows "$workflow" --dryrun
+done
+"""
+
+[tasks."ci:local"]
+description = "Actually run a CI job locally with act (needs Docker; pass -j <job>)"
+# act cannot reproduce everything GitHub provides - no Pages, no OIDC, no code
+# scanning upload - but it does run steps on Linux, which is where both of this
+# project's CI failures came from.
+run = "act --workflows .github/workflows"
 
 [tasks."lint:actions"]
 description = "Lint the GitHub Actions workflows"
