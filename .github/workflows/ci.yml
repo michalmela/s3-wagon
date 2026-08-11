@@ -36,6 +36,10 @@ jobs:
           key: ${{ runner.os }}-maven-${{ hashFiles('pom.xml') }}
           restore-keys: ${{ runner.os }}-maven-
 
+      # These workflows were only ever linted by hand before.
+      - name: Lint
+        run: mise run lint
+
       # Includes the MinIO integration tests; the runner provides Docker.
       - name: Verify
         run: mise run verify

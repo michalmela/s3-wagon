@@ -22,6 +22,9 @@ analysis. It needs Docker; without it the integration tests skip rather than fai
 mise run pre-commit
 ```
 
+That runs the linters and the unit tests. `mise run lint` on its own checks the GitHub Actions
+workflows with actionlint, which CI runs too — before this they were only ever linted by hand.
+
 If you would rather not remember, wire it into git:
 
 ```sh
@@ -95,6 +98,18 @@ changelog, then merge it. That tags 1.1.0, publishes to Clojars, and attaches th
 
 The version in `pom.xml` and the two version references in `README.md` are all updated by
 release-please, so none of them should be edited by hand.
+
+To see what it would propose before merging anything:
+
+```sh
+mise run release:preview
+```
+
+Two caveats. It reads the branch from GitHub, so it can only describe work that has been pushed —
+there is no previewing a local branch. And it runs the release-please CLI pinned in `mise.toml`,
+while CI runs whatever the action bundles (`^17.6.0` at the time of writing): the same major
+version, so representative, but not the identical build. Treat a disagreement between the two as
+the action being right.
 
 Merge this branch with a **merge commit rather than a squash**. Release-please reads the individual
 commit subjects to decide the version and write the changelog; squashing collapses 48 of them into

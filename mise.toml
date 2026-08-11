@@ -1,4 +1,5 @@
 [tools]
+actionlint = "1.7.12"
 "aqua:sharkdp/hyperfine" = "1.20.0"
 # The second JDK is only used by verify:java8, which checks that the artifact
 # really runs on the Java 8 bytecode level it ships.
@@ -66,6 +67,34 @@ confirm = "Deploy a release to Clojars?"
 depends = ["verify"]
 run = "mvn deploy"
 
+[tasks."release:preview"]
+description = "Preview the release release-please would propose"
+# Scoped to this task rather than the project toolchain: it needs a Node
+# runtime, which nothing else here does, and it is a convenience rather
+# than part of the build. The action bundles release-please ^17.6.0, so
+# this is representative without being the identical build.
+tools = { node = "24", "npm:release-please" = "17.11.1" }
+run = """
+set -euo pipefail
+release-please release-pr \
+  --repo-url=michalmela/s3-wagon \
+  --config-file=release-please-config.json \
+  --manifest-file=.release-please-manifest.json \
+  --token="$(gh auth token)" \
+  --target-branch="${MISE_RELEASE_BRANCH:-master}" \
+  --dry-run
+"""
+
+[tasks."lint:actions"]
+description = "Lint the GitHub Actions workflows"
+run = "actionlint"
+sources = [".github/workflows/*.yml"]
+outputs = { auto = true }
+
+[tasks.lint]
+description = "Run every linter"
+depends = ["lint:*"]
+
 [tasks.pre-commit]
 description = "Checks that run before every commit"
-depends = ["test"]
+depends = ["lint", "test"]
