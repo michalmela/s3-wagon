@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+#MISE description="Benchmark upload concurrency and the streaming path against MinIO"
+#MISE depends=["build"]
+#USAGE flag "-s --size <size>" help="megabytes to upload in the concurrency benchmark" default="64"
+#USAGE flag "-i --iterations <iterations>" help="small transfers per run in the streaming benchmark" default="200"
+#USAGE flag "-r --runs <runs>" help="hyperfine runs per variant" default="10"
+#USAGE flag "-l --latency <latency>" help="milliseconds of round-trip latency to inject (0 = loopback)" default="0"
+set -euo pipefail
+
+size="${usage_size:-64}"
+iterations="${usage_iterations:-200}"
+runs="${usage_runs:-10}"
+latency="${usage_latency:-0}"
+container="s3-wagon-bench-$$"
+proxy="s3-wagon-bench-proxy-$$"
+network="s3-wagon-bench-net-$$"
+port=19100
+proxy_port=19101
+api_port=19102
+
+cleanup() {
+  docker rm -f "$container" "$proxy" >/dev/null 2>&1 || true
+  docker network rm "$network" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+echo "==> starting MinIO"
+docker network create "$network" >/dev/null
+docker run -d --name "$container" --network "$network" -p "${port}:9000" \
+  -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+  minio/minio:RELEASE.2025-09-07T16-13-09Z server /data >/dev/null
+for _ in $(seq 1 60); do
+  curl -fsS "http://127.0.0.1:${port}/minio/health/live" >/dev/null 2>&1 && break
+  sleep 1
+done
+
+if [ "$latency" -gt 0 ]; then
+  # Loopback has no round-trip time for concurrency to hide, which would make a
+  # parallel upload look pointless. Inject latency so the numbers say something
+  # about a real endpoint.
+  echo "==> injecting ${latency}ms of latency with toxiproxy"
+  docker run -d --name "$proxy" --network "$network" \
+    -p "${proxy_port}:${proxy_port}" -p "${api_port}:8474" \
+    ghcr.io/shopify/toxiproxy:2.12.0 >/dev/null
+  for _ in $(seq 1 60); do
+    curl -fsS "http://127.0.0.1:${api_port}/version" >/dev/null 2>&1 && break
+    sleep 1
+  done
+  curl -fsS -X POST "http://127.0.0.1:${api_port}/proxies" \
+    -d "{\"name\":\"minio\",\"listen\":\"0.0.0.0:${proxy_port}\",\"upstream\":\"${container}:9000\"}" >/dev/null
+  curl -fsS -X POST "http://127.0.0.1:${api_port}/proxies/minio/toxics" \
+    -d "{\"type\":\"latency\",\"attributes\":{\"latency\":$((latency / 2)),\"jitter\":2}}" >/dev/null
+  export BENCH_ENDPOINT="http://127.0.0.1:${proxy_port}"
+else
+  export BENCH_ENDPOINT="http://127.0.0.1:${port}"
+fi
+docker run --rm --network "$network" --entrypoint sh minio/mc:RELEASE.2025-08-13T08-35-41Z -c \
+  "mc alias set bench http://${container}:9000 minioadmin minioadmin >/dev/null && mc mb --ignore-existing bench/bench >/dev/null"
+
+echo "==> compiling the harness"
+mvn -q dependency:build-classpath -Dmdep.outputFile=target/runtime-classpath.txt -Dmdep.includeScope=runtime
+jar=$(ls target/s3-wagon-*.jar | grep -vE -- "-(sources|javadoc)\.jar$" | head -1)
+cp="$jar:$(cat target/runtime-classpath.txt)"
+mkdir -p target/bench
+javac -nowarn -cp "$cp" -d target/bench src/bench/java/Bench.java
+run="java -cp target/bench:$cp Bench"
+
+$run seed >/dev/null
+payload="target/bench/payload-${size}mb.bin"
+$run make-payload "$payload" "$size" >/dev/null
+
+mkdir -p target/bench-results
+
+echo
+echo "==> multipart upload of ${size}MB, by concurrency (latency: ${latency}ms)"
+hyperfine --warmup 1 --runs "$runs" \
+  --export-markdown target/bench-results/concurrency.md \
+  --command-name "concurrency=1" "$run upload $payload 1" \
+  --command-name "concurrency=2" "$run upload $payload 2" \
+  --command-name "concurrency=4" "$run upload $payload 4" \
+  --command-name "concurrency=8" "$run upload $payload 8"
+
+echo
+echo "==> ${iterations} small downloads, file path vs stream path"
+hyperfine --warmup 1 --runs "$runs" \
+  --export-markdown target/bench-results/streaming.md \
+  --command-name "get to file (pre-StreamingWagon path)" "$run get-to-file $iterations" \
+  --command-name "get to stream (StreamingWagon path)" "$run get-to-stream $iterations"
+
+echo
+echo "results written to target/bench-results/"

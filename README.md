@@ -181,6 +181,13 @@ s3-wagon: bucket=somebucket prefix=releases/ region=eu-central-1 endpoint=<aws> 
 
 Credentials themselves are never logged.
 
+## Performance
+
+`multipartConcurrency` defaults to 4 because that is where the benefit flattens out: against an
+endpoint with 40ms of round-trip latency, uploading a 64MB artifact is 1.33x faster than sequential
+at concurrency 4 and 1.38x at 8. Against a local endpoint parallelism is slightly *slower* — there
+is no latency to hide. See [BENCHMARKS.md](BENCHMARKS.md) for the method and the numbers.
+
 ## Upgrading
 
 ### From 1.0.x, if your repository URL has no trailing slash

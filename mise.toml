@@ -1,4 +1,5 @@
 [tools]
+"aqua:sharkdp/hyperfine" = "1.20.0"
 # The second JDK is only used by verify:java8, which checks that the artifact
 # really runs on the Java 8 bytecode level it ships.
 java = ["zulu-26.32.13.0", "zulu-8.96.0.19"]
