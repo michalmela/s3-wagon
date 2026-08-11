@@ -45,11 +45,22 @@ jobs:
             exit 1
           fi
 
+      # Signing runs on a dry run too: it is the part most likely to be
+      # misconfigured, and a rehearsal that skips it proves nothing.
       - name: Import the signing key
-        if: ${{ !inputs.dry_run }}
         env:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
         run: printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --import
+
+      - name: Sign the artifacts
+        if: ${{ inputs.dry_run }}
+        env:
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          mvn -B --no-transfer-progress -P release -DskipTests -Dspotbugs.skip=true verify
+          ls -1 target/*.asc
+          echo "dry run: signed but not deployed"
 
       - name: Deploy
         if: ${{ !inputs.dry_run }}

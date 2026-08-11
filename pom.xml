@@ -294,6 +294,15 @@
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-gpg-plugin</artifactId>
                         <version>${maven-gpg-plugin.version}</version>
+                        <configuration>
+                            <!-- There is no tty on a CI runner, so gpg has to take the
+                                 passphrase from MAVEN_GPG_PASSPHRASE rather than prompting.
+                                 Without loopback pinentry it hangs and then fails. -->
+                            <gpgArguments>
+                                <arg>--pinentry-mode</arg>
+                                <arg>loopback</arg>
+                            </gpgArguments>
+                        </configuration>
                         <executions>
                             <execution>
                                 <id>sign-artifacts</id>
