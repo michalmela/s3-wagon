@@ -1,0 +1,62 @@
+name: Vulnerabilities
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  schedule:
+    # Weekly, so a newly published advisory against an unchanged dependency
+    # still surfaces. Renovate only reacts when a fixed version exists.
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: Scan dependencies
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4
+        with:
+          version: 2026.8.3
+          cache: true
+
+      - name: Cache Maven repository
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('pom.xml') }}
+          restore-keys: ${{ runner.os }}-maven-
+
+      # The build already produces a CycloneDX SBOM; scanning that covers every
+      # transitive dependency that actually ships, not just the declared ones.
+      - name: Generate the SBOM
+        run: mvn -B --no-transfer-progress -DskipTests package
+
+      - name: Scan the SBOM
+        uses: google/osv-scanner-action@8deb546fdb875b9996d27d4950be7312dac076a1 # v2.5.0
+        continue-on-error: true
+        with:
+          scan-args: |-
+            --format=sarif
+            --output=osv-results.sarif
+            --sbom=target/bom.json
+
+      - name: Upload results to code scanning
+        if: always() && hashFiles('osv-results.sarif') != ''
+        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4
+        with:
+          sarif_file: osv-results.sarif
+
+      # Everything is reported to the Security tab; only high and critical
+      # findings break the build, so the red is worth reacting to.
+      - name: Fail on high or critical findings
+        if: always() && hashFiles('osv-results.sarif') != ''
+        run: mise run scan:gate osv-results.sarif

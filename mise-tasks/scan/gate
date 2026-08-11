@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+#MISE description="Fail when a vulnerability scan reports a high or critical finding"
+#USAGE arg "<sarif>" help="SARIF file produced by the scanner"
+set -euo pipefail
+
+sarif="${usage_sarif:?a SARIF file is required}"
+if [ ! -f "$sarif" ]; then
+  echo "no SARIF file at $sarif; nothing to check"
+  exit 0
+fi
+
+python3 - "$sarif" <<'PY'
+import json, sys
+
+path = sys.argv[1]
+with open(path) as handle:
+    report = json.load(handle)
+
+# OSV-Scanner reports severity as a security-severity score on the rule
+# (CVSS, 0.0-10.0). GitHub treats >= 7.0 as high and >= 9.0 as critical.
+blocking = []
+for run in report.get("runs", []):
+    rules = {}
+    for rule in run.get("tool", {}).get("driver", {}).get("rules", []):
+        score = rule.get("properties", {}).get("security-severity")
+        if score is not None:
+            try:
+                rules[rule.get("id")] = float(score)
+            except ValueError:
+                pass
+    for result in run.get("results", []):
+        score = rules.get(result.get("ruleId"))
+        if score is not None and score >= 7.0:
+            blocking.append((result.get("ruleId"), score))
+
+total = sum(len(run.get("results", [])) for run in report.get("runs", []))
+if blocking:
+    print(f"{len(blocking)} high or critical finding(s) out of {total}:")
+    for rule, score in sorted(set(blocking), key=lambda item: -item[1]):
+        print(f"  {rule} (severity {score})")
+    sys.exit(1)
+
+print(f"no high or critical findings ({total} finding(s) reported to the Security tab)")
+PY

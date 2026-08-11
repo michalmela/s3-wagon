@@ -237,6 +237,12 @@ the old wire format:
 export S3WAGON_REQUEST_CHECKSUM_CALCULATION=when_required
 ```
 
+## Releasing
+
+Releases are automated: conventional commits on `master` drive a release pull request that bumps the
+version and writes the changelog, and merging it tags the release, publishes to Clojars and attaches
+the artifacts and SBOM to the GitHub release. See [CONTRIBUTING.md](CONTRIBUTING.md#releasing).
+
 ## Building
 
 The JDK and Maven versions are pinned in `mise.toml`. With

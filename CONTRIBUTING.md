@@ -68,6 +68,38 @@ There are four, and they catch different things:
 A change to what goes over the wire deserves more than the first row. The in-memory client cannot
 see content encodings, checksum trailers, or signing — regressions have hidden in exactly that gap.
 
+## Releasing
+
+Releases are driven by [release-please](https://github.com/googleapis/release-please), which reads
+the conventional-commit subjects on `master`:
+
+1. Every push to `master` updates an open **release pull request** that bumps the version in
+   `pom.xml` and adds the changelog entries for what has landed.
+2. **Add anything a generator cannot know to that pull request before merging it** — migration
+   steps, behaviour changes worth calling out, anything a user needs in order to upgrade safely.
+   The changelog in this project has always carried that kind of note, and it is the reason the
+   release pull request is a review step rather than a rubber stamp.
+3. Merging it tags `vX.Y.Z` and creates the GitHub release.
+4. The tag triggers the release workflow, which runs the full verification, refuses to publish if
+   the tag and the project version disagree, signs the artifacts and deploys them to Clojars, then
+   attaches the jars and the SBOM to the GitHub release.
+
+So the commit subject is not cosmetic: `feat:` and `fix:` decide both the next version number and
+what appears in the changelog. A `feat!:` or a `BREAKING CHANGE:` footer drives a major bump.
+
+Nothing publishes snapshots — `distributionManagement` declares the release repository only.
+
+## Security scanning
+
+The build produces a CycloneDX SBOM, and CI scans it with
+[OSV-Scanner](https://github.com/google/osv-scanner) on every pull request and once a week. The
+weekly run matters: Renovate only opens a pull request when a fixed version exists, whereas an
+advisory published against a dependency nobody has patched yet will only show up here.
+
+Everything found is reported to the repository's Security tab. High and critical findings
+(CVSS >= 7.0) fail the build; anything lower is reported without blocking, so a red build stays
+worth reacting to. That threshold lives in `mise-tasks/scan/gate`.
+
 ## Reporting bugs
 
 Include the wagon version, the Maven or Leiningen version, the repository URL shape (with the bucket
