@@ -84,6 +84,27 @@ the conventional-commit subjects on `master`:
    the tag and the project version disagree, signs the artifacts and deploys them to Clojars, then
    attaches the jars and the SBOM to the GitHub release.
 
+Tags carry no `v` prefix, matching the existing `1.0.0` and `1.0.1`.
+
+### The first release after this branch lands
+
+1.1.0 is a special case: the version is already set in `pom.xml` and its changelog entry is already
+written by hand, but nothing has been published — Clojars still has 1.0.1. So tag it directly rather
+than waiting for a release pull request:
+
+```sh
+git tag 1.1.0 && git push origin 1.1.0
+```
+
+That triggers the release workflow, and it also gives release-please the anchor it needs: with a
+1.1.0 tag present and the manifest already at 1.1.0, it stays quiet until the next `feat:` or `fix:`
+lands, and then proposes 1.2.0. Without that tag it would ignore 1.1.0 and jump straight to 1.2.0,
+leaving a version documented as released that never was.
+
+Merge this branch with a **merge commit rather than a squash**. Release-please reads the individual
+commit subjects to decide the version and write the changelog; squashing collapses 48 of them into
+one, and if that one is titled `chore:` it produces no release at all.
+
 So the commit subject is not cosmetic: `feat:` and `fix:` decide both the next version number and
 what appears in the changelog. A `feat!:` or a `BREAKING CHANGE:` footer drives a major bump.
 

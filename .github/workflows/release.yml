@@ -4,7 +4,9 @@ name: Release
 # maintains; this workflow only reacts to it.
 on:
   push:
-    tags: ["v*"]
+    # This project's tags carry no "v" prefix - 1.0.0, 1.0.1 - and
+    # release-please is configured to keep it that way.
+    tags: ["[0-9]*"]
   workflow_dispatch:
     inputs:
       dry_run:
@@ -35,7 +37,7 @@ jobs:
         run: mise run verify
 
       - name: Check the tag matches the project version
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME#v}"
@@ -91,7 +93,7 @@ jobs:
       # release-please has already created the GitHub Release with the generated
       # notes; this puts the built artifacts and the SBOM on it.
       - name: Attach artifacts to the GitHub release
-        if: ${{ !inputs.dry_run && startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ !inputs.dry_run && startsWith(github.ref, 'refs/tags/') }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
