@@ -113,6 +113,24 @@ from a script. Publish the public half so signatures can be checked by anyone:
 gpg --keyserver keyserver.ubuntu.com --send-keys YOUR_KEY_ID
 ```
 
+The `2y` sets the **key's** expiry, not the signature's. The difference matters:
+
+* signatures made before expiry keep verifying afterwards - GnuPG still reports `Good signature`,
+  just with the key marked `[expired]`, and exits 0. Artifacts already on Clojars stay verifiable.
+* what breaks is making *new* signatures: gpg refuses, so a release two years from now would fail.
+
+Expiry is a dead-man's switch rather than a deadline, and it is extendable at any time:
+
+```sh
+gpg --quick-set-expire YOUR_FINGERPRINT 2y
+gpg --keyserver keyserver.ubuntu.com --send-keys YOUR_KEY_ID   # publish the new expiry
+gpg --armor --export-secret-keys YOUR_KEY_ID | gh secret set GPG_PRIVATE_KEY
+```
+
+So that nobody discovers this the hard way, the release workflow checks the key before signing: it
+warns when fewer than 60 days remain and fails outright once the key has expired, naming the command
+to fix it. Run it locally with `mise run release:check-key`.
+
 Two details make this work unattended on a runner, both already configured:
 
 * the passphrase reaches gpg through `MAVEN_GPG_PASSPHRASE` rather than a prompt

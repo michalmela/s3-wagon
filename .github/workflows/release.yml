@@ -52,6 +52,11 @@ jobs:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
         run: printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --import
 
+      # An expired signing key fails the build here with a clear message, rather
+      # than deep inside gpg two years from now.
+      - name: Check the signing key
+        run: mise run release:check-key --days 60
+
       - name: Sign the artifacts
         if: ${{ inputs.dry_run }}
         env:

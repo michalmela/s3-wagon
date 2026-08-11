@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+#MISE description="Check how long the signing key has left before it expires"
+#USAGE flag "-d --days <days>" help="warn when fewer than this many days remain" default="60"
+set -euo pipefail
+
+days="${usage_days:-60}"
+
+# gpg speaks the local language; the colon format does not.
+listing=$(LC_ALL=C gpg --list-secret-keys --with-colons 2>/dev/null || true)
+if [ -z "$listing" ]; then
+  echo "no signing key in the keyring; nothing to check"
+  exit 0
+fi
+
+python3 - "$days" <<PY
+import sys, time
+
+days = int(sys.argv[1])
+listing = """$listing"""
+now = time.time()
+
+expiries = []
+for line in listing.splitlines():
+    fields = line.split(":")
+    if fields and fields[0] == "sec":
+        uid = fields[4]
+        expiry = fields[6]
+        expiries.append((uid, float(expiry) if expiry else None))
+
+if not expiries:
+    print("no secret key found; nothing to check")
+    raise SystemExit(0)
+
+failed = False
+for uid, expiry in expiries:
+    if expiry is None:
+        print(f"key {uid}: no expiry set")
+        continue
+    remaining = (expiry - now) / 86400
+    when = time.strftime("%Y-%m-%d", time.gmtime(expiry))
+    if remaining <= 0:
+        print(f"::error::signing key {uid} expired on {when}. "
+              f"Extend it with: gpg --quick-set-expire <fingerprint> 2y")
+        failed = True
+    elif remaining < days:
+        print(f"::warning::signing key {uid} expires on {when}, in {remaining:.0f} days. "
+              f"Extend it with: gpg --quick-set-expire <fingerprint> 2y, "
+              f"then update the GPG_PRIVATE_KEY secret.")
+    else:
+        print(f"key {uid} expires on {when}, in {remaining:.0f} days")
+
+raise SystemExit(1 if failed else 0)
+PY
