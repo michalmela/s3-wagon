@@ -81,6 +81,16 @@ hyperfine --warmup 1 --runs "$runs" \
   --command-name "concurrency=8" "$run upload $payload 8"
 
 echo
+echo "==> download of ${size}MB, by concurrency (latency: ${latency}ms)"
+$run seed-big "$payload" >/dev/null
+hyperfine --warmup 1 --runs "$runs" \
+  --export-markdown target/bench-results/download-concurrency.md \
+  --command-name "download concurrency=1" "$run download 1 16777216" \
+  --command-name "download concurrency=2" "$run download 2 16777216" \
+  --command-name "download concurrency=4" "$run download 4 16777216" \
+  --command-name "download concurrency=8" "$run download 8 16777216"
+
+echo
 echo "==> ${iterations} small downloads, file path vs stream path"
 hyperfine --warmup 1 --runs "$runs" \
   --export-markdown target/bench-results/streaming.md \

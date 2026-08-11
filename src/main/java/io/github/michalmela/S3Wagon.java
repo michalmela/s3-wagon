@@ -41,7 +41,9 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.RandomAccessFile;
 import java.net.URI;
+import java.nio.ByteBuffer;
 import java.nio.channels.Channels;
+import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.time.Duration;
@@ -65,6 +67,18 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
     private static final int MAX_PARTS = 10_000;
 
     private static final long DEFAULT_MULTIPART_CONCURRENCY = 4;
+
+    /**
+     * Off by default. Ranged downloads only pay off for large artifacts over a high-latency link,
+     * and unlike uploads they change what transfer listeners observe - see setDownloadConcurrency.
+     */
+    private static final long DEFAULT_DOWNLOAD_CONCURRENCY = 1;
+
+    private static final long DEFAULT_DOWNLOAD_CHUNK_SIZE = 16L * 1024 * 1024;
+
+    private static final long MINIMUM_DOWNLOAD_CHUNK_SIZE = 1024L * 1024;
+
+    private static final long DEFAULT_DOWNLOAD_THRESHOLD = 32L * 1024 * 1024;
 
     /** More connections than the HTTP client's default pool would only queue. */
     private static final int MAX_MULTIPART_CONCURRENCY = 16;
@@ -106,12 +120,29 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
     private String storageClass;
     private String objectTags;
     private String retries;
+    private String downloadConcurrency;
+    private String downloadChunkSize;
+    private String downloadThreshold;
 
     /** Overridden by tests; environment variables cannot be set in-process. */
     private Function<String, String> environment = System::getenv;
 
-    /** Guards transfer-progress events, which concurrent part uploads would otherwise interleave. */
+    /**
+     * Guards transfer-progress events, which concurrent transfers would otherwise interleave.
+     *
+     * <p>Only {@link #reportProgress} touches it. Reaching it from the inner stream class would
+     * make the compiler generate an accessor for it, which hands the lock to anything that can see
+     * the class.
+     */
     private final Object progressLock = new Object();
+
+    /** Fires one progress event, serialised against every other concurrent transfer. */
+    private void reportProgress(Resource resource, int requestType, byte[] buffer, int read) {
+        TransferEvent event = new TransferEvent(this, resource, TransferEvent.TRANSFER_PROGRESS, requestType);
+        synchronized (progressLock) {
+            fireTransferProgress(event, buffer, read);
+        }
+    }
 
     private ServerSideEncryption encryption;
     private ObjectCannedACL acl;
@@ -230,6 +261,26 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
         this.retries = retries;
     }
 
+    /**
+     * Number of ranged GETs to run at once for a large download; 1 (the default) disables it.
+     *
+     * <p>Splitting a download means transfer listeners see the bytes out of order. Listeners that
+     * only count bytes - which is what Maven's progress reporting does - are unaffected, but a
+     * listener that digests the stream as it arrives, such as Wagon's own {@code ChecksumObserver},
+     * would produce a wrong result. That is why this is off unless asked for.
+     */
+    public void setDownloadConcurrency(String downloadConcurrency) {
+        this.downloadConcurrency = downloadConcurrency;
+    }
+
+    public void setDownloadChunkSize(String downloadChunkSize) {
+        this.downloadChunkSize = downloadChunkSize;
+    }
+
+    public void setDownloadThreshold(String downloadThreshold) {
+        this.downloadThreshold = downloadThreshold;
+    }
+
     void setEnvironment(Function<String, String> environment) {
         this.environment = environment;
     }
@@ -265,6 +316,24 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
 
     String profile() {
         return setting(profile, "s3wagon.profile", "S3WAGON_PROFILE");
+    }
+
+    int downloadConcurrency() {
+        long configured = bytes(
+                setting(downloadConcurrency, "s3wagon.downloadConcurrency", "S3WAGON_DOWNLOAD_CONCURRENCY"),
+                DEFAULT_DOWNLOAD_CONCURRENCY);
+        return (int) Math.max(1, Math.min(configured, MAX_MULTIPART_CONCURRENCY));
+    }
+
+    long downloadChunkSize() {
+        return Math.max(MINIMUM_DOWNLOAD_CHUNK_SIZE, bytes(
+                setting(downloadChunkSize, "s3wagon.downloadChunkSize", "S3WAGON_DOWNLOAD_CHUNK_SIZE"),
+                DEFAULT_DOWNLOAD_CHUNK_SIZE));
+    }
+
+    long downloadThreshold() {
+        return bytes(setting(downloadThreshold, "s3wagon.downloadThreshold", "S3WAGON_DOWNLOAD_THRESHOLD"),
+                DEFAULT_DOWNLOAD_THRESHOLD);
     }
 
     int multipartConcurrency() {
@@ -310,6 +379,9 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
             multipartPartSize();
             multipartConcurrency();
             retries();
+            downloadConcurrency();
+            downloadChunkSize();
+            downloadThreshold();
         } catch (NumberFormatException e) {
             throw new ConnectionException("multipartThreshold, multipartPartSize, multipartConcurrency and retries must all be numbers", e);
         }
@@ -442,6 +514,15 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
     private void download(String resourceName, Resource resource, File destination, OutputStream stream)
             throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
         fireTransferDebug("fetching s3://" + bucket + "/" + key(resourceName));
+        int concurrency = downloadConcurrency();
+        if (destination != null && concurrency > 1) {
+            // A stream has to be written in order, so only the file path can be split up.
+            long length = lengthForRangedDownload(resourceName);
+            if (length > downloadThreshold()) {
+                downloadInRanges(resourceName, resource, destination, length, concurrency);
+                return;
+            }
+        }
         try {
             GetObjectRequest objectRequest = GetObjectRequest
                     .builder()
@@ -561,13 +642,126 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
         }
 
         private void report(byte[] buffer, int read) {
-            TransferEvent event = new TransferEvent(
-                    S3Wagon.this, resource, TransferEvent.TRANSFER_PROGRESS, TransferEvent.REQUEST_PUT);
             // Parts may be uploaded concurrently; transfer listeners are not documented as thread
             // safe, so they only ever see one event at a time.
-            synchronized (progressLock) {
-                fireTransferProgress(event, buffer, read);
+            reportProgress(resource, TransferEvent.REQUEST_PUT, buffer, read);
+        }
+    }
+
+    /**
+     * The object size, or -1 when it cannot be established cheaply. A HEAD costs a round trip, so
+     * it is only worth it when the result might let the download be split up.
+     */
+    private long lengthForRangedDownload(String resourceName)
+            throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
+        try {
+            Long length = headObject(resourceName).contentLength();
+            return length == null ? -1 : length;
+        } catch (SdkException e) {
+            if (isMissing(e)) {
+                throw new ResourceDoesNotExistException(resourceName + " not found in S3", e);
             }
+            if (isAuthorizationFailure(e)) {
+                throw new AuthorizationException("Not authorized to read " + resourceName + " from S3", e);
+            }
+            throw new TransferFailedException("Lookup of " + resourceName + " in S3 failed", e);
+        }
+    }
+
+    /**
+     * Downloads an object as several ranged GETs written straight into the destination file.
+     *
+     * <p>Positional channel writes are safe from several threads, so the chunks can land in any
+     * order. Progress events are serialised, but they are necessarily reported out of order - see
+     * {@link #setDownloadConcurrency(String)}.
+     */
+    private void downloadInRanges(String resourceName, Resource resource, File destination, long length,
+            int concurrency) throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
+        long chunkSize = downloadChunkSize();
+        int chunks = (int) ((length + chunkSize - 1) / chunkSize);
+        fireTransferDebug("s3-wagon: ranged download of " + length + " bytes in " + chunks
+                + " chunks with concurrency " + concurrency);
+        resource.setContentLength(length);
+        createParentDirectories(destination);
+        fireGetStarted(resource, destination);
+
+        ExecutorService pool = Executors.newFixedThreadPool(Math.min(concurrency, chunks), runnable -> {
+            Thread thread = new Thread(runnable, "s3-wagon-download");
+            thread.setDaemon(true);
+            return thread;
+        });
+        try (RandomAccessFile file = new RandomAccessFile(destination, "rw")) {
+            file.setLength(length);
+            FileChannel channel = file.getChannel();
+            List<Future<?>> futures = new ArrayList<>();
+            for (int chunk = 0; chunk < chunks; chunk++) {
+                long start = chunk * chunkSize;
+                long end = Math.min(start + chunkSize, length) - 1;
+                futures.add(pool.submit(() -> {
+                    fetchRange(resourceName, resource, channel, start, end);
+                    return null;
+                }));
+            }
+            for (Future<?> future : futures) {
+                awaitChunk(future);
+            }
+        } catch (IOException e) {
+            failRangedDownload(resource, destination, e);
+            throw new TransferFailedException("Transfer of " + resourceName + " from S3 failed", e);
+        } catch (SdkException e) {
+            failRangedDownload(resource, destination, e);
+            if (isMissing(e)) {
+                throw new ResourceDoesNotExistException(resourceName + " not found in S3", e);
+            }
+            if (isAuthorizationFailure(e)) {
+                throw new AuthorizationException("Not authorized to read " + resourceName + " from S3", e);
+            }
+            throw new TransferFailedException("Transfer of " + resourceName + " from S3 failed", e);
+        } finally {
+            pool.shutdownNow();
+        }
+        fireGetCompleted(resource, destination);
+    }
+
+    private void fetchRange(String resourceName, Resource resource, FileChannel channel, long start, long end) {
+        GetObjectRequest request = GetObjectRequest.builder()
+                .bucket(bucket)
+                .key(key(resourceName))
+                .range("bytes=" + start + "-" + end)
+                .build();
+        try (ResponseInputStream<GetObjectResponse> body = s3.getObject(request)) {
+            byte[] buffer = new byte[64 * 1024];
+            long position = start;
+            int read;
+            while ((read = body.read(buffer)) != -1) {
+                channel.write(ByteBuffer.wrap(buffer, 0, read), position);
+                position += read;
+                reportProgress(resource, TransferEvent.REQUEST_GET, buffer, read);
+            }
+        } catch (IOException e) {
+            throw SdkClientException.create("Could not write " + resourceName, e);
+        }
+    }
+
+    private void failRangedDownload(Resource resource, File destination, Exception e) {
+        if (destination.exists() && !destination.delete()) {
+            destination.deleteOnExit();
+        }
+        fireTransferError(resource, e, TransferEvent.REQUEST_GET);
+    }
+
+    private static void awaitChunk(Future<?> future) {
+        try {
+            future.get();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw SdkClientException.create("interrupted while downloading a range", e);
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof RuntimeException) {
+                throw (RuntimeException) cause;
+            }
+            throw SdkClientException.create("a range failed to download", cause);
         }
     }
 

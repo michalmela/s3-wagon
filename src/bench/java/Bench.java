@@ -28,6 +28,12 @@ public final class Bench {
             case "make-payload":
                 makePayload(args[1], Integer.parseInt(args[2]));
                 break;
+            case "download":
+                download(args[1], args[2]);
+                break;
+            case "seed-big":
+                seedBig(args[1]);
+                break;
             case "get-to-file":
                 getToFile(Integer.parseInt(args[1]));
                 break;
@@ -94,6 +100,32 @@ public final class Bench {
             wagon.getToStream("g/a/1.0/a-1.0.jar.sha1", destination);
         }
         wagon.disconnect();
+    }
+
+    /** Downloads one large artifact at a given download concurrency. */
+    private static void download(String concurrency, String chunk) throws Exception {
+        S3Wagon wagon = wagon();
+        wagon.setDownloadConcurrency(concurrency);
+        wagon.setDownloadChunkSize(chunk);
+        wagon.setDownloadThreshold("1048576");
+        connect(wagon);
+        File destination = File.createTempFile("bench-download", ".jar");
+        if (!destination.delete()) {
+            throw new IllegalStateException("could not clear the destination");
+        }
+        wagon.get("g/big/1.0/big-1.0.jar", destination);
+        wagon.disconnect();
+        if (!destination.delete()) {
+            throw new IllegalStateException("could not clean up");
+        }
+    }
+
+    private static void seedBig(String path) throws Exception {
+        S3Wagon wagon = wagon();
+        connect(wagon);
+        wagon.put(new File(path), "g/big/1.0/big-1.0.jar");
+        wagon.disconnect();
+        System.out.println("seeded big");
     }
 
     private static void seed() throws Exception {

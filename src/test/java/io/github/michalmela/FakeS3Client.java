@@ -44,7 +44,7 @@ import java.util.Map;
  * interface default, which throws {@link UnsupportedOperationException}. That is deliberate - if
  * the wagon starts calling something new, the tests should notice.
  */
-final class FakeS3Client implements S3Client {
+class FakeS3Client implements S3Client {
 
     private final Map<String, byte[]> content = new HashMap<>();
     private final Map<String, Instant> lastModified = new HashMap<>();
@@ -143,13 +143,32 @@ final class FakeS3Client implements S3Client {
         return requests.get(requests.size() - 1);
     }
 
+    private final java.util.concurrent.atomic.AtomicInteger rangeRequests =
+            new java.util.concurrent.atomic.AtomicInteger();
+
+    int rangeRequestCount() {
+        return rangeRequests.get();
+    }
+
     @Override
-    public ResponseInputStream<GetObjectResponse> getObject(GetObjectRequest request) {
+    public synchronized ResponseInputStream<GetObjectResponse> getObject(GetObjectRequest request) {
         getRequests.add(request);
         throwIfFailing();
         byte[] bytes = content.get(request.key());
         if (bytes == null) {
             throw NoSuchKeyException.builder().message("no such key: " + request.key()).build();
+        }
+        if (request.range() != null) {
+            rangeRequests.incrementAndGet();
+            // "bytes=start-end", inclusive at both ends, as S3 defines it.
+            String[] bounds = request.range().substring("bytes=".length()).split("-");
+            int start = Integer.parseInt(bounds[0]);
+            int end = Math.min(Integer.parseInt(bounds[1]), bytes.length - 1);
+            byte[] slice = new byte[end - start + 1];
+            System.arraycopy(bytes, start, slice, 0, slice.length);
+            return new ResponseInputStream<>(
+                    GetObjectResponse.builder().contentLength((long) slice.length).build(),
+                    new ByteArrayInputStream(slice));
         }
         GetObjectResponse response = GetObjectResponse.builder()
                 .contentLength((long) bytes.length)

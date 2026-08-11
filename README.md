@@ -115,6 +115,9 @@ In `settings.xml`: unless you use [the default credential provider chain](https:
 | `storageClass`         | Storage class for uploaded objects                                       | `STANDARD_IA`                  |
 | `objectTags`           | Tags to apply on upload, as a URL-encoded query string                   | `team=platform&tier=build`     |
 | `retries`              | Retry attempts after the first (the SDK's default when unset)            | `5`                            |
+| `downloadConcurrency`  | Ranged GETs per large download (1 = off; measured no benefit, see below) | `4`                            |
+| `downloadChunkSize`    | Bytes per ranged GET (16MB, minimum 1MB)                                 | `16777216`                     |
+| `downloadThreshold`    | Downloads larger than this many bytes may be split (32MB)                | `33554432`                     |
 
 Everything is optional; leave a setting out and the wagon does not send it, which keeps the bucket's
 own defaults in charge.
@@ -160,6 +163,9 @@ over an environment variable:
 | `storageClass`         | `s3wagon.storageClass`         | `S3WAGON_STORAGE_CLASS`           |
 | `objectTags`           | `s3wagon.objectTags`           | `S3WAGON_OBJECT_TAGS`             |
 | `retries`              | `s3wagon.retries`              | `S3WAGON_RETRIES`                 |
+| `downloadConcurrency`  | `s3wagon.downloadConcurrency`  | `S3WAGON_DOWNLOAD_CONCURRENCY`    |
+| `downloadChunkSize`    | `s3wagon.downloadChunkSize`    | `S3WAGON_DOWNLOAD_CHUNK_SIZE`     |
+| `downloadThreshold`    | `s3wagon.downloadThreshold`    | `S3WAGON_DOWNLOAD_THRESHOLD`      |
 
 For example, to publish to a MinIO instance:
 
@@ -187,6 +193,12 @@ Credentials themselves are never logged.
 endpoint with 40ms of round-trip latency, uploading a 64MB artifact is 1.33x faster than sequential
 at concurrency 4 and 1.38x at 8. Against a local endpoint parallelism is slightly *slower* — there
 is no latency to hide. See [BENCHMARKS.md](BENCHMARKS.md) for the method and the numbers.
+
+`downloadConcurrency` defaults to 1 — off — because measurement showed splitting a download into
+ranged GETs is about 5% *slower*. An upload is many requests and overlapping them hides latency; a
+download is one request that streams, so splitting it adds round trips without hiding any. It is
+there for links where a single connection cannot saturate the bandwidth, but measure before
+believing it helps.
 
 ## Upgrading
 

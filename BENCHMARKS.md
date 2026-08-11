@@ -47,6 +47,35 @@ half the connections.
 **Conclusion: the parallel upload path earns its place, but only against a real endpoint.** Anyone
 benchmarking this against a local MinIO should expect it to look useless.
 
+## Ranged parallel downloads
+
+Same 64MB artifact, fetched with `downloadConcurrency` set to each value, 16MB chunks.
+
+| Concurrency | 40ms RTT |
+|-------------|----------|
+| 1 (default) | **758ms** |
+| 2           | 802ms |
+| 4           | 802ms |
+| 8           | 793ms |
+
+**Parallelism does not help downloads, and costs about 5%.** This is not the same shape of problem
+as uploading.
+
+A multipart upload is inherently many requests — thirteen parts here, each paying its own round
+trip — so overlapping them hides real latency. A download is *one* request: a single round trip,
+after which the body streams and the transfer is bandwidth-bound. Splitting it into four ranged
+GETs adds four round trips instead of one, plus a HEAD to learn the object size before the ranges
+can be worked out, and buys nothing back because one connection was already keeping the pipe full.
+
+The feature is implemented and tested, but **off by default** (`downloadConcurrency=1`). It is worth
+trying only on a link where a single TCP connection cannot saturate the available bandwidth — a
+long fat network, where the bandwidth-delay product exceeds what one window can carry. That is not
+something this harness can model, so there is no measurement here showing it winning. If you turn it
+on, measure it on your own link rather than trusting that more connections must be faster.
+
+Turning it on also changes what transfer listeners see: bytes are reported out of order, which is
+fine for byte counting but wrong for anything digesting the stream as it arrives.
+
 ## StreamingWagon vs the file-based path
 
 Small object (a 40-byte checksum), fetched repeatedly, comparing `get(name, file)` — the path the
