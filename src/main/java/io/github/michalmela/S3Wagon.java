@@ -1125,6 +1125,16 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
                 || isNotFound(e);
     }
 
+    /**
+     * Whether the failure is a bare HTTP 404, with no error code in the body to identify it by.
+     *
+     * <p>Package-private so it can be asserted on directly; {@link #isMissing} is the predicate the
+     * transfer paths actually use.
+     */
+    static boolean isNotFound(SdkException e) {
+        return statusCode(e) == 404;
+    }
+
     private static boolean isAuthorizationFailure(SdkException e) {
         return e instanceof ExpiredTokenException
                 || statusCode(e) == 401
@@ -1149,16 +1159,6 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
             resource = resource.substring(1);
         }
         return this.baseDirectory + resource;
-    }
-
-    /**
-     * Whether the failure is a bare HTTP 404, with no error code in the body to identify it by.
-     *
-     * <p>Package-private so it can be asserted on directly; {@link #isMissing} is the predicate the
-     * transfer paths actually use.
-     */
-    static boolean isNotFound(SdkException e) {
-        return statusCode(e) == 404;
     }
 
     private S3Client s3(AuthenticationInfo authenticationInfo, SdkHttpClient httpClient) throws ConnectionException {
