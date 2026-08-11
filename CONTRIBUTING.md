@@ -89,6 +89,41 @@ what appears in the changelog. A `feat!:` or a `BREAKING CHANGE:` footer drives 
 
 Nothing publishes snapshots — `distributionManagement` declares the release repository only.
 
+### The signing key
+
+Releases are signed. Generating the key is a one-off:
+
+```sh
+gpg --quick-generate-key "Your Name <you@example.com>" rsa4096 sign 2y
+gpg --list-secret-keys --keyid-format=long        # the id follows rsa4096/
+```
+
+The private key and its passphrase go into repository secrets. Piping avoids putting the key in
+shell history:
+
+```sh
+gpg --armor --export-secret-keys YOUR_KEY_ID | gh secret set GPG_PRIVATE_KEY
+gh secret set GPG_PASSPHRASE                      # prompts on stdin
+```
+
+Exporting asks for the passphrase; that prompt is interactive, so run it in a terminal rather than
+from a script. Publish the public half so signatures can be checked by anyone:
+
+```sh
+gpg --keyserver keyserver.ubuntu.com --send-keys YOUR_KEY_ID
+```
+
+Two details make this work unattended on a runner, both already configured:
+
+* the passphrase reaches gpg through `MAVEN_GPG_PASSPHRASE` rather than a prompt
+* `--pinentry-mode loopback` is pinned in the release profile, because a runner has no tty and gpg
+  would otherwise wait forever for a passphrase dialog
+
+The whole path — export an armoured key, import it into an empty keyring, sign non-interactively —
+has been rehearsed against a throwaway key: six artifacts get signed, the signatures verify, and a
+modified file fails verification. Before the first real release, run the Release workflow with
+`dry_run` enabled: it imports the key and signs, and stops short of deploying.
+
 ## Security scanning
 
 The build produces a CycloneDX SBOM, and CI scans it with
