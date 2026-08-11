@@ -5,7 +5,7 @@
     <modelVersion>4.0.0</modelVersion>
     <groupId>io.github.michalmela</groupId>
     <artifactId>s3-wagon</artifactId>
-    <version>1.0.1</version>
+    <version>1.0.2</version>
     <description>Maven wagon for S3 with support for Leiningen, the Clojure build tool.</description>
 
     <url>https://github.com/michalmela/s3-wagon</url>
@@ -59,6 +59,12 @@
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
         </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>5.9.3</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
@@ -72,6 +78,11 @@
                     <source>8</source>
                     <target>8</target>
                 </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.1.2</version>
             </plugin>
         </plugins>
     </build>

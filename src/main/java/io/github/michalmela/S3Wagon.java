@@ -71,9 +71,14 @@ public final class S3Wagon extends AbstractWagon {
             this.fireGetCompleted(resource, destination);
         } catch (NoSuchKeyException | NoSuchBucketException e) {
             throw new ResourceDoesNotExistException(resourceName + " not found in S3", e);
+        } catch (S3Exception e) {
+            if (isNotFound(e)) {
+                throw new ResourceDoesNotExistException(resourceName + " not found in S3", e);
+            }
+            throw new TransferFailedException("Transfer from S3 failed", e);
         } catch (ExpiredTokenException e) {
             throw new AuthorizationException("S3 authorization error", e);
-        } catch (S3Exception | IOException e) {
+        } catch (IOException e) {
             throw new TransferFailedException("Transfer from S3 failed", e);
         }
     }
@@ -102,6 +107,11 @@ public final class S3Wagon extends AbstractWagon {
             return headObject.lastModified().getEpochSecond() > timestamp;
         } catch (NoSuchKeyException | NoSuchBucketException e) {
             throw new ResourceDoesNotExistException(resourceName + " not found in S3", e);
+        } catch (S3Exception e) {
+            if (isNotFound(e)) {
+                throw new ResourceDoesNotExistException(resourceName + " not found in S3", e);
+            }
+            throw new TransferFailedException("Transfer from S3 failed", e);
         } catch (ExpiredTokenException e) {
             throw new AuthorizationException("S3 authorization error", e);
         } catch (AwsServiceException e) {
@@ -120,6 +130,10 @@ public final class S3Wagon extends AbstractWagon {
 
     private String key(String resourceName) {
         return this.baseDirectory + resourceName;
+    }
+
+    static boolean isNotFound(S3Exception exception) {
+        return exception.statusCode() == 404;
     }
 
     private static S3Client s3(AuthenticationInfo authenticationInfo, SdkHttpClient httpClient) {
@@ -155,8 +169,11 @@ public final class S3Wagon extends AbstractWagon {
         try {
             headObject(resourceName);
             return true;
-        } catch (NoSuchKeyException e) {
-            return false;
+        } catch (S3Exception e) {
+            if (isNotFound(e)) {
+                return false;
+            }
+            throw e;
         }
     }
 

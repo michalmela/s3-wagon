@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/)
 and this project adheres to [Semantic Versioning](http://semver.org/).
 
+## [1.0.2] - 2026-08-11
+
+### Fixed
+
+* Treat generic S3 HTTP 404 responses as missing resources instead of retryable transfer failures
+
 ## [1.0.1] - 2023-01-12
 
 ### Changed
