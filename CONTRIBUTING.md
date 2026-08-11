@@ -208,6 +208,21 @@ Everything found is reported to the repository's Security tab. High and critical
 (CVSS >= 7.0) fail the build; anything lower is reported without blocking, so a red build stays
 worth reacting to. That threshold lives in `mise-tasks/scan/gate`.
 
+## Repository settings these workflows expect
+
+Two workflows are wired up but depend on a setting only a repository admin can flip:
+
+* **GitHub Pages** — the Javadoc workflow builds the docs on every push to `master` and publishes
+  them to Pages. Publishing is skipped, with a notice, until Pages is enabled under
+  *Settings > Pages* with *Source* set to *GitHub Actions*. The workflow token cannot enable it
+  itself; that needs a personal access token, which is not worth holding for a one-off click.
+* **Renovate** — `renovate.json` is only read once the Renovate GitHub App is installed on the
+  repository. Until then nothing opens dependency pull requests.
+
+OpenSSF Scorecard needs nothing: it runs on pushes to `master` and weekly, and publishes its results
+for a public repository. The badge for it is deliberately absent from the README until the first run
+produces data, because it would render broken before that.
+
 ## Reporting bugs
 
 Include the wagon version, the Maven or Leiningen version, the repository URL shape (with the bucket
