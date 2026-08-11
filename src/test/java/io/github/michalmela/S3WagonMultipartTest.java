@@ -9,7 +9,10 @@ import software.amazon.awssdk.services.s3.model.ServerSideEncryption;
 import software.amazon.awssdk.services.s3.model.UploadPartRequest;
 
 import java.io.File;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Random;
+import java.util.stream.Collectors;
 
 import static io.github.michalmela.S3WagonPutTest.fileContaining;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -62,13 +65,20 @@ class S3WagonMultipartTest {
 
         wagon.put(fileContaining(payload), RESOURCE);
 
-        assertEquals(3, s3.uploadPartRequests().size());
-        assertEquals(1, s3.uploadPartRequests().get(0).partNumber());
-        assertEquals(5L * 1024 * 1024, s3.uploadPartRequests().get(0).contentLength());
+        // Parts are uploaded concurrently, so they are recorded in whatever order they finish.
+        // Sort by part number before asserting: the numbering and the sizes are what matter here,
+        // not which thread got there first.
+        List<UploadPartRequest> parts = s3.uploadPartRequests().stream()
+                .sorted(Comparator.comparingInt(UploadPartRequest::partNumber))
+                .collect(Collectors.toList());
+
+        assertEquals(3, parts.size());
+        assertEquals(List.of(1, 2, 3),
+                parts.stream().map(UploadPartRequest::partNumber).collect(Collectors.toList()));
+        assertEquals(5L * 1024 * 1024, parts.get(0).contentLength());
+        assertEquals(5L * 1024 * 1024, parts.get(1).contentLength());
         // The last part carries the remainder and may be smaller than the minimum.
-        UploadPartRequest last = s3.uploadPartRequests().get(2);
-        assertEquals(3, last.partNumber());
-        assertEquals(2L * 1024 * 1024, last.contentLength());
+        assertEquals(2L * 1024 * 1024, parts.get(2).contentLength());
     }
 
     @Test
