@@ -49,6 +49,7 @@ usage = '''
 flag "--java <java>" help="mise java version to run the wagon on" default="zulu-8.96.0.19"
 '''
 run = """
+#!/usr/bin/env bash
 set -euo pipefail
 mvn -q dependency:build-classpath -Dmdep.outputFile=target/runtime-classpath.txt -Dmdep.includeScope=runtime
 # The build also produces -sources and -javadoc jars; neither carries classes.
@@ -75,6 +76,7 @@ description = "Preview the release release-please would propose"
 # this is representative without being the identical build.
 tools = { node = "24", "npm:release-please" = "17.11.1" }
 run = """
+#!/usr/bin/env bash
 set -euo pipefail
 release-please release-pr \
   --repo-url=michalmela/s3-wagon \
