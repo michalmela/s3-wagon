@@ -44,9 +44,13 @@ jobs:
         uses: google/osv-scanner-action/osv-scanner-action@8deb546fdb875b9996d27d4950be7312dac076a1 # v2.5.0
         continue-on-error: true
         with:
+          # v2 takes a subcommand, and the action passes these through verbatim.
+          # --output is deprecated in favour of --output-file.
           scan-args: |-
+            scan
+            source
             --format=sarif
-            --output=osv-results.sarif
+            --output-file=osv-results.sarif
             --sbom=target/bom.json
 
       - name: Upload results to code scanning
