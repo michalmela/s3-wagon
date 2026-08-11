@@ -92,7 +92,7 @@ Tags carry no `v` prefix, matching the existing `1.0.0` and `1.0.1`.
 ### The first release after this branch lands
 
 Nothing special: merge, and release-please opens a release pull request proposing 1.1.0, because the
-branch carries `feat:` commits and the last released version is 1.0.1. Paste the migration notes for
+branch carries `feat:` commits and the last released version is 1.0.2. Paste the migration notes for
 this release from [UPGRADING.md](UPGRADING.md) into that pull request if you want them echoed in the
 changelog, then merge it. That tags 1.1.0, publishes to Clojars, and attaches the artifacts.
 

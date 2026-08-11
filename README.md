@@ -1,5 +1,10 @@
 # s3-wagon
 
+[![Clojars Project](https://img.shields.io/clojars/v/io.github.michalmela/s3-wagon.svg)](https://clojars.org/io.github.michalmela/s3-wagon)
+[![CI](https://github.com/michalmela/s3-wagon/actions/workflows/ci.yml/badge.svg)](https://github.com/michalmela/s3-wagon/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/michalmela/s3-wagon)](LICENSE)
+![Java 8+](https://img.shields.io/badge/java-8%2B-blue)
+
 A drop-in replacement for https://github.com/s3-wagon-private/s3-wagon-private but:
 
  * based on newer AWS SDK and Maven APIs
@@ -16,7 +21,7 @@ trailing slash on the prefix is optional.
 In `project.clj`:
 
 ```clj
-:plugins [[io.github.michalmela/s3-wagon "1.0.1"]] ;; x-release-please-version
+:plugins [[io.github.michalmela/s3-wagon "1.0.2"]] ;; x-release-please-version
 
 ;;; option 1: use default credentials provider
 ; cf. https://docs.aws.amazon.com/sdk-for-java/latest/developer-guide/credentials.html#credentials-chain
@@ -58,7 +63,7 @@ In `pom.xml`:
         <extension>
             <groupId>io.github.michalmela</groupId>
             <artifactId>s3-wagon</artifactId>
-            <version>1.0.1</version> <!-- x-release-please-version -->
+            <version>1.0.2</version> <!-- x-release-please-version -->
         </extension>
     </extensions>
 </build>
