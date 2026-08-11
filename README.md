@@ -16,7 +16,7 @@ trailing slash on the prefix is optional.
 In `project.clj`:
 
 ```clj
-:plugins [[io.github.michalmela/s3-wagon "1.1.0"]]
+:plugins [[io.github.michalmela/s3-wagon "1.0.1"]] ;; x-release-please-version
 
 ;;; option 1: use default credentials provider
 ; cf. https://docs.aws.amazon.com/sdk-for-java/latest/developer-guide/credentials.html#credentials-chain
@@ -58,7 +58,7 @@ In `pom.xml`:
         <extension>
             <groupId>io.github.michalmela</groupId>
             <artifactId>s3-wagon</artifactId>
-            <version>1.1.0</version>
+            <version>1.0.1</version> <!-- x-release-please-version -->
         </extension>
     </extensions>
 </build>
@@ -202,40 +202,9 @@ believing it helps.
 
 ## Upgrading
 
-### From 1.0.x, if your repository URL has no trailing slash
-
-Before 1.1.0 the S3 key was built by concatenating the URL path and the resource name without a
-separator, so a URL like `s3p://somebucket/releases` (no trailing slash) wrote artifacts to keys
-such as `releasesg/a/1.0/a-1.0.jar`. 1.1.0 fixes that, which means it now reads and writes
-`releases/g/a/1.0/a-1.0.jar` - and will **not** see artifacts published by earlier versions.
-
-Note that the old keys are the prefix run together with the *group path*, so there is one mangled
-prefix per leading group segment - `com.example` ended up under `releasescom/example/...`, `org.foo`
-under `releasesorg/foo/...`. List what you actually have first:
-
-```sh
-aws s3 ls s3://somebucket/ | grep -v ' releases/'
-```
-
-then move each one into place:
-
-```sh
-aws s3 mv --recursive s3://somebucket/releasescom/ s3://somebucket/releases/com/
-```
-
-Re-deploying the affected artifacts works just as well. Repository URLs that already ended with a
-slash are unaffected.
-
-### Uploads carry a checksum trailer
-
-The AWS SDK adds a CRC32 trailer (`x-amz-trailer`, `Content-Encoding: aws-chunked`) to uploads by
-default, which SDK 2.19 - used by 1.0.x - did not. AWS S3 handles this fine, but some S3-compatible
-stores reject it. If a previously working upload starts failing against a non-AWS endpoint, restore
-the old wire format:
-
-```sh
-export S3WAGON_REQUEST_CHECKSUM_CALCULATION=when_required
-```
+Coming from 1.0.x, two changes need action on your side: repository URLs without a trailing
+slash now resolve to different S3 keys, and uploads carry a checksum trailer some S3-compatible
+stores reject. Both are written up in [UPGRADING.md](UPGRADING.md).
 
 ## Releasing
 

@@ -88,18 +88,13 @@ Tags carry no `v` prefix, matching the existing `1.0.0` and `1.0.1`.
 
 ### The first release after this branch lands
 
-1.1.0 is a special case: the version is already set in `pom.xml` and its changelog entry is already
-written by hand, but nothing has been published — Clojars still has 1.0.1. So tag it directly rather
-than waiting for a release pull request:
+Nothing special: merge, and release-please opens a release pull request proposing 1.1.0, because the
+branch carries `feat:` commits and the last released version is 1.0.1. Paste the migration notes for
+this release from [UPGRADING.md](UPGRADING.md) into that pull request if you want them echoed in the
+changelog, then merge it. That tags 1.1.0, publishes to Clojars, and attaches the artifacts.
 
-```sh
-git tag 1.1.0 && git push origin 1.1.0
-```
-
-That triggers the release workflow, and it also gives release-please the anchor it needs: with a
-1.1.0 tag present and the manifest already at 1.1.0, it stays quiet until the next `feat:` or `fix:`
-lands, and then proposes 1.2.0. Without that tag it would ignore 1.1.0 and jump straight to 1.2.0,
-leaving a version documented as released that never was.
+The version in `pom.xml` and the two version references in `README.md` are all updated by
+release-please, so none of them should be edited by hand.
 
 Merge this branch with a **merge commit rather than a squash**. Release-please reads the individual
 commit subjects to decide the version and write the changelog; squashing collapses 48 of them into
