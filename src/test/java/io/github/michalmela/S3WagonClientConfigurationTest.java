@@ -3,7 +3,10 @@ package io.github.michalmela;
 import org.apache.maven.wagon.authentication.AuthenticationInfo;
 import org.apache.maven.wagon.proxy.ProxyInfo;
 import org.apache.maven.wagon.repository.Repository;
+import org.apache.maven.wagon.ConnectionException;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.URI;
 import java.util.Arrays;
@@ -12,6 +15,8 @@ import java.util.HashSet;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * These build a real S3 client rather than the in-memory one. Building a client makes no network
@@ -25,7 +30,7 @@ class S3WagonClientConfigurationTest {
      * every request quietly bypassed it.
      */
     @Test
-    void buildsAUsableProxyEndpoint() {
+    void buildsAUsableProxyEndpoint() throws Exception {
         ProxyInfo proxy = new ProxyInfo();
         proxy.setHost("proxy.example.com");
         proxy.setPort(8080);
@@ -38,7 +43,7 @@ class S3WagonClientConfigurationTest {
     }
 
     @Test
-    void honoursAnHttpsProxy() {
+    void honoursAnHttpsProxy() throws Exception {
         ProxyInfo proxy = new ProxyInfo();
         proxy.setHost("proxy.example.com");
         proxy.setPort(8443);
@@ -49,13 +54,39 @@ class S3WagonClientConfigurationTest {
 
     /** Apache's proxy support is HTTP-only, so a SOCKS type cannot be passed through as a scheme. */
     @Test
-    void fallsBackToHttpForProxyTypesApacheCannotUse() {
+    void fallsBackToHttpForProxyTypesApacheCannotUse() throws Exception {
         ProxyInfo proxy = new ProxyInfo();
         proxy.setHost("proxy.example.com");
         proxy.setPort(1080);
         proxy.setType(ProxyInfo.PROXY_SOCKS5);
 
         assertEquals("http", S3Wagon.proxyEndpoint(proxy).getScheme());
+    }
+
+    /**
+     * Found by throwing adversarial hosts at proxyEndpoint: a space, a pipe or a stray percent
+     * made URI.create throw IllegalArgumentException, which escaped connect unchecked and blamed
+     * nothing in particular. A malformed proxy host should say so.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"bad host", "prox|y", "%%", "host\nwithnewline"})
+    void rejectsAProxyHostThatCannotBeAUrl(String host) {
+        ProxyInfo proxy = new ProxyInfo();
+        proxy.setHost(host);
+        proxy.setPort(8080);
+
+        ConnectionException thrown = assertThrows(ConnectionException.class, () -> S3Wagon.proxyEndpoint(proxy));
+        assertTrue(thrown.getMessage().contains("not a usable host name"), thrown.getMessage());
+    }
+
+    /** A host read from an environment variable often arrives with a newline attached. */
+    @Test
+    void toleratesWhitespaceAroundTheProxyHost() throws Exception {
+        ProxyInfo proxy = new ProxyInfo();
+        proxy.setHost("  proxy.example.com\n");
+        proxy.setPort(8080);
+
+        assertEquals("proxy.example.com", S3Wagon.proxyEndpoint(proxy).getHost());
     }
 
     @Test

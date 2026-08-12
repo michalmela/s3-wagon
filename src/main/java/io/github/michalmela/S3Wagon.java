@@ -41,6 +41,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.RandomAccessFile;
 import java.net.URI;
+import java.net.URISyntaxException;
 import java.nio.ByteBuffer;
 import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
@@ -1230,7 +1231,7 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
                 && isNotBlank(authenticationInfo.getPassword());
     }
 
-    private SdkHttpClient awsHttpClient(ProxyInfo proxyInfo) {
+    private SdkHttpClient awsHttpClient(ProxyInfo proxyInfo) throws ConnectionException {
         ApacheHttpClient.Builder httpClientBuilder = ApacheHttpClient.builder();
         // Maven configures these through the Wagon interface; before this they were accepted and
         // then dropped, leaving every build on the SDK defaults.
@@ -1260,10 +1261,19 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
      * <p>Apache's proxy support speaks HTTP, so a SOCKS proxy type cannot be honoured here and is
      * treated as HTTP rather than producing a URI the SDK will reject.
      */
-    static URI proxyEndpoint(ProxyInfo proxyInfo) {
+    static URI proxyEndpoint(ProxyInfo proxyInfo) throws ConnectionException {
         String type = proxyInfo.getType();
         String scheme = "https".equalsIgnoreCase(type) ? "https" : "http";
-        return URI.create(scheme + "://" + proxyInfo.getHost() + ":" + proxyInfo.getPort());
+        // Trimmed because a host read from an environment variable often arrives with a newline
+        // attached, which is never meaningful and would otherwise be rejected below.
+        String host = proxyInfo.getHost().trim();
+        try {
+            return new URI(scheme + "://" + host + ":" + proxyInfo.getPort());
+        } catch (URISyntaxException e) {
+            // A space, a pipe or a stray percent is enough. Left unchecked this escaped connect as
+            // an IllegalArgumentException, which says nothing about the proxy being at fault.
+            throw new ConnectionException("proxy host \"" + host + "\" is not a usable host name", e);
+        }
     }
 
     /** Wagon separates non-proxy hosts with '|'; the SDK wants them one by one. */
