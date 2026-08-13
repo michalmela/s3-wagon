@@ -122,69 +122,37 @@ Nothing publishes snapshots — `distributionManagement` declares the release re
 
 ### The signing key
 
-Releases are signed. Generating the key is a one-off:
+Releases are signed, and so are commits. Generate the key with your GitHub **noreply** address as
+its only identity:
 
 ```sh
-gpg --quick-generate-key "Your Name <you@example.com>" rsa4096 sign 2y
+gpg --quick-generate-key "Your Name <ID+username@users.noreply.github.com>" rsa4096 sign 2y
 ```
 
-GnuPG identifies that key three ways, which is worth knowing because different commands want
-different ones:
+That address matters twice over. GitHub only marks a signature verified when the committer email
+matches an identity on the key, and commits here use the noreply address — so a key carrying only a
+personal address produces signatures marked Unverified. It also keeps a personal address off the
+key entirely, which is worth caring about because **an identity published to a keyserver cannot be
+taken back**: the SKS family, keyserver.ubuntu.com among them, is append-only. A UID can be revoked
+but not removed, and revoked UIDs stay legible.
 
-| | Looks like | Where it comes from |
-|---|---|---|
-| Fingerprint | 40 hex characters | `gpg --fingerprint`; the unambiguous identifier |
-| Key ID | the last 16 hex characters of the fingerprint | shown after `rsa4096/` in `--list-keys` |
-| User ID | `Your Name <you@example.com>` | whatever you typed when generating |
-
-Any of them works in most commands. Rather than copying hex around, put the fingerprint in a shell
-variable once and use it throughout:
-
-```sh
-FPR=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr/{print $10; exit}')
-echo "$FPR"
-```
-
-The private key and its passphrase then go into repository secrets. Piping avoids putting the key
-in shell history:
+If you publish the public key at all, publish it to [keys.openpgp.org](https://keys.openpgp.org),
+which only distributes an address after the owner confirms it and honours deletion afterwards.
+Publishing is optional: GitHub verifies signatures from the key uploaded to your account, with no
+keyserver involved.
 
 ```sh
+FPR=$(gpg --list-secret-keys --with-colons "ID+username@users.noreply.github.com" \
+        | awk -F: '/^fpr/{print $10; exit}')
+gpg --armor --export "$FPR"                                  # paste into GitHub, Settings > SSH and GPG keys
 gpg --armor --export-secret-keys "$FPR" | gh secret set GPG_PRIVATE_KEY
-gh secret set GPG_PASSPHRASE                      # prompts on stdin
+gh secret set GPG_PASSPHRASE                                 # prompts on stdin
+git config user.signingkey "$FPR"
+git config commit.gpgsign true
 ```
 
-Exporting asks for the passphrase; that prompt is interactive, so run it in a terminal rather than
-from a script — non-interactively it fails silently and exports nothing. Publish the public half so
-signatures can be checked by anyone:
-
-```sh
-gpg --keyserver keyserver.ubuntu.com --send-keys "$FPR"
-```
-
-The `2y` sets the **key's** expiry, not the signature's. The difference matters:
-
-* signatures made before expiry keep verifying afterwards - GnuPG still reports `Good signature`,
-  just with the key marked `[expired]`, and exits 0. Artifacts already on Clojars stay verifiable.
-* what breaks is making *new* signatures: gpg refuses, so a release two years from now would fail.
-
-Expiry is a dead-man's switch rather than a deadline, and it is extendable at any time:
-
-```sh
-FPR=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr/{print $10; exit}')
-gpg --quick-set-expire "$FPR" 2y
-gpg --keyserver keyserver.ubuntu.com --send-keys "$FPR"        # publish the new expiry
-gpg --armor --export-secret-keys "$FPR" | gh secret set GPG_PRIVATE_KEY
-```
-
-Both `--quick-set-expire` and `--export-secret-keys` unlock the key, so both prompt for the
-passphrase — run them in a terminal, not from a script.
-
-That last line is the one people forget: the secret holds a copy of the key as it was when
-exported, so extending the expiry locally without re-exporting leaves CI signing with the old one.
-
-So that nobody discovers this the hard way, the release workflow checks the key before signing: it
-warns when fewer than 60 days remain and fails outright once the key has expired, naming the command
-to fix it. Run it locally with `mise run release:check-key`.
+Beware `gpg --refresh-keys`: it merges whatever a keyserver holds back into your keyring, so a UID
+you deleted locally reappears if it was ever published.
 
 Two details make this work unattended on a runner, both already configured:
 
