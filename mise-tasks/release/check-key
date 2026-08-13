@@ -12,11 +12,13 @@ if [ -z "$listing" ]; then
   exit 0
 fi
 
-python3 - "$days" <<PY
-import sys, time
+# The listing travels in the environment, not spliced into the source: a key whose
+# UID contained a triple quote would otherwise end the string literal and run as code.
+GPG_LISTING="$listing" python3 - "$days" <<'PY'
+import os, sys, time
 
 days = int(sys.argv[1])
-listing = """$listing"""
+listing = os.environ.get("GPG_LISTING", "")
 now = time.time()
 
 expiries = []
