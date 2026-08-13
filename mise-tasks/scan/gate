@@ -10,7 +10,7 @@ if [ ! -f "$sarif" ]; then
 fi
 
 python3 - "$sarif" <<'PY'
-import json, sys
+import json, os, sys
 
 path = sys.argv[1]
 with open(path) as handle:
@@ -34,6 +34,34 @@ for run in report.get("runs", []):
             blocking.append((result.get("ruleId"), score))
 
 total = sum(len(run.get("results", [])) for run in report.get("runs", []))
+
+# Everything worth knowing goes in the job summary too, so the answer is visible
+# without opening the log or the Security tab.
+summary = []
+if total == 0:
+    summary.append("## No known vulnerabilities\n")
+    summary.append("OSV-Scanner found nothing in the dependencies this artifact ships.\n")
+else:
+    summary.append(f"## {total} vulnerability finding(s)\n")
+    if blocking:
+        summary.append(f"**{len(blocking)} of them are high or critical, which fails this build.**\n")
+    else:
+        summary.append("None are high or critical, so the build is not failed.\n")
+    summary.append("\n| Severity | Advisory |\n|---|---|\n")
+    for run in report.get("runs", []):
+        rules = {r.get("id"): r for r in run.get("tool", {}).get("driver", {}).get("rules", [])}
+        for result in run.get("results", []):
+            rule = rules.get(result.get("ruleId"), {})
+            score = rule.get("properties", {}).get("security-severity", "?")
+            link = rule.get("helpUri") or f"https://osv.dev/{result.get('ruleId')}"
+            summary.append(f"| {score} | [{result.get('ruleId')}]({link}) |\n")
+    summary.append("\nFull detail is in the repository's Security tab.\n")
+
+step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
+if step_summary:
+    with open(step_summary, "a") as handle:
+        handle.writelines(summary)
+
 if blocking:
     print(f"{len(blocking)} high or critical finding(s) out of {total}:")
     for rule, score in sorted(set(blocking), key=lambda item: -item[1]):

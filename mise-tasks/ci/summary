@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+#MISE description="Summarise the last build's tests and coverage"
+# Written to GITHUB_STEP_SUMMARY when running in Actions, stdout otherwise, so
+# the numbers are visible on the run page rather than only in the log.
+set -euo pipefail
+
+python3 - <<'PY'
+import glob, os, sys
+import xml.etree.ElementTree as ET
+
+def totals(pattern):
+    tests = failures = errors = skipped = 0
+    for path in glob.glob(pattern):
+        root = ET.parse(path).getroot()
+        tests += int(root.get("tests", 0))
+        failures += int(root.get("failures", 0))
+        errors += int(root.get("errors", 0))
+        skipped += int(root.get("skipped", 0))
+    return tests, failures, errors, skipped
+
+unit = totals("target/surefire-reports/TEST-*.xml")
+integration = totals("target/failsafe-reports/TEST-*.xml")
+
+lines = ["## Build summary\n\n", "| | Tests | Failures | Errors | Skipped |\n", "|---|---:|---:|---:|---:|\n"]
+for name, (t, f, e, s) in (("Unit", unit), ("Integration", integration)):
+    if t:
+        lines.append(f"| {name} | {t} | {f} | {e} | {s} |\n")
+
+coverage = "target/site/jacoco/jacoco.csv"
+if os.path.exists(coverage):
+    import csv
+    im = cm = bm = bc = 0
+    for row in csv.DictReader(open(coverage)):
+        im += int(row["INSTRUCTION_MISSED"]); cm += int(row["INSTRUCTION_COVERED"])
+        bm += int(row["BRANCH_MISSED"]);      bc += int(row["BRANCH_COVERED"])
+    if cm + im:
+        lines.append(f"\n**Coverage** — instructions {cm/(cm+im)*100:.1f}%, "
+                     f"branches {bc/(bc+bm)*100:.1f}%\n" if bc + bm else "")
+
+if integration[0] and integration[3] == integration[0]:
+    lines.append("\n> Every integration test was skipped, which means Docker was unavailable.\n")
+
+output = "".join(lines)
+target = os.environ.get("GITHUB_STEP_SUMMARY")
+if target:
+    with open(target, "a") as handle:
+        handle.write(output)
+print(output)
+PY

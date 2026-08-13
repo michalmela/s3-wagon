@@ -30,7 +30,7 @@ jobs:
           cache: true
 
       - name: Cache Maven repository
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.m2/repository
           key: ${{ runner.os }}-maven-${{ hashFiles('pom.xml') }}
@@ -46,6 +46,12 @@ jobs:
       # Includes the MinIO integration tests; the runner provides Docker.
       - name: Verify
         run: mise run verify
+
+      # Puts the test counts and coverage on the run page, so the outcome does
+      # not require opening the log.
+      - name: Summarise the build
+        if: always()
+        run: mise run ci:summary
 
       - name: Upload coverage report
         if: always()
@@ -78,7 +84,7 @@ jobs:
           cache: true
 
       - name: Cache Maven repository
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.m2/repository
           key: ${{ runner.os }}-maven-${{ hashFiles('pom.xml') }}
@@ -103,7 +109,7 @@ jobs:
           cache: true
 
       - name: Cache Maven repository
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.m2/repository
           key: ${{ runner.os }}-maven-${{ hashFiles('pom.xml') }}

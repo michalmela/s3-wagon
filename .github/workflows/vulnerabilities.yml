@@ -29,7 +29,7 @@ jobs:
           cache: true
 
       - name: Cache Maven repository
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.m2/repository
           key: ${{ runner.os }}-maven-${{ hashFiles('pom.xml') }}
@@ -60,7 +60,8 @@ jobs:
           sarif_file: osv-results.sarif
 
       # Everything is reported to the Security tab; only high and critical
-      # findings break the build, so the red is worth reacting to.
+      # findings break the build, so the red is worth reacting to. The gate also
+      # writes what it found to the run summary.
       - name: Fail on high or critical findings
         if: always() && hashFiles('osv-results.sarif') != ''
         run: mise run scan:gate osv-results.sarif
