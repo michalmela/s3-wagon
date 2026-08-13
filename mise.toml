@@ -7,6 +7,7 @@ actionlint = "1.7.12"
 java = ["zulu-26.32.13.0", "zulu-8.96.0.19"]
 maven = "3.9.16"
 pinact = "3.9.0"
+scorecard = "5.5.0"
 
 [env]
 # Keep the local repository resolution reproducible across machines and CI.
@@ -112,6 +113,13 @@ description = "Actually run a CI job locally with act (needs Docker; pass -j <jo
 # scanning upload - but it does run steps on Linux, which is where both of this
 # project's CI failures came from.
 run = "act --workflows .github/workflows"
+
+[tasks.scorecard]
+description = "Score this repository's supply-chain practices locally"
+# The binary cannot publish results - that is OIDC work the GitHub Action does,
+# and it is what makes the public badge exist - so this complements the workflow
+# rather than replacing it. Useful for seeing a score before pushing.
+run = "scorecard --repo=github.com/michalmela/s3-wagon --show-details"
 
 [tasks."lint:pinned"]
 description = "Check every GitHub Action is pinned to a commit SHA"

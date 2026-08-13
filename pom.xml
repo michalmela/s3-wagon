@@ -225,6 +225,14 @@
                 <groupId>org.cyclonedx</groupId>
                 <artifactId>cyclonedx-maven-plugin</artifactId>
                 <version>${cyclonedx-maven-plugin.version}</version>
+                <configuration>
+                    <!-- An SBOM should describe what this artifact ships. Provided dependencies
+                         are supplied by whatever runs the wagon - Maven brings its own
+                         plexus-utils - so listing them here overstates what consumers receive,
+                         and makes a vulnerability in the host's copy look like one in ours. -->
+                    <includeProvidedScope>false</includeProvidedScope>
+                    <includeTestScope>false</includeTestScope>
+                </configuration>
                 <executions>
                     <execution>
                         <id>sbom</id>
