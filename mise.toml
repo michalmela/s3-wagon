@@ -113,6 +113,15 @@ description = "Actually run a CI job locally with act (needs Docker; pass -j <jo
 # project's CI failures came from.
 run = "act --workflows .github/workflows"
 
+[tasks."lint:pinned"]
+description = "Check every GitHub Action is pinned to a commit SHA"
+# --check fails rather than rewriting, which is what CI wants. --verify also
+# confirms each SHA really is the version the comment claims, so a pin cannot
+# quietly drift from its label.
+run = "pinact run --check --verify"
+sources = [".github/workflows/*.yml", ".pinact.yaml"]
+outputs = { auto = true }
+
 [tasks."lint:actions"]
 description = "Lint the GitHub Actions workflows"
 run = "actionlint"
