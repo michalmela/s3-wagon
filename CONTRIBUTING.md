@@ -235,6 +235,31 @@ Two workflows are wired up but depend on a setting only a repository admin can f
 * **Renovate** — `renovate.json` is only read once the Renovate GitHub App is installed on the
   repository. Until then nothing opens dependency pull requests.
 
+### Secrets the release needs
+
+Four, all repository secrets (or scoped to a `release` environment if you want an approval gate on
+publishing). `GITHUB_TOKEN` is provided automatically and needs nothing.
+
+| Secret | What it is |
+|---|---|
+| `GPG_PRIVATE_KEY` | armoured export of the signing key |
+| `GPG_PASSPHRASE` | that key's passphrase |
+| `CLOJARS_USERNAME` | your Clojars account name |
+| `CLOJARS_DEPLOY_TOKEN` | a Clojars **deploy token**, not your account password |
+
+Clojars authenticates a deploy with the account username and a deploy token in place of the
+password; a token cannot be used to log in, which is the point of it. Create one under
+*Clojars > Dashboard > Deploy Tokens* and scope it as narrowly as it will go —
+`io.github.michalmela/s3-wagon` covers this artifact and nothing else, where `*` would cover
+everything you can publish.
+
+```sh
+gh secret set CLOJARS_USERNAME
+gh secret set CLOJARS_DEPLOY_TOKEN
+```
+
+Both prompt on stdin, so neither ends up in shell history.
+
 ### Required status checks
 
 These can only be configured once the workflows have run on `master`, because GitHub offers checks

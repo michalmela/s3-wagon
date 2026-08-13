@@ -73,7 +73,7 @@ jobs:
         if: ${{ !inputs.dry_run }}
         env:
           CLOJARS_USERNAME: ${{ secrets.CLOJARS_USERNAME }}
-          CLOJARS_PASSWORD: ${{ secrets.CLOJARS_PASSWORD }}
+          CLOJARS_DEPLOY_TOKEN: ${{ secrets.CLOJARS_DEPLOY_TOKEN }}
           MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
           mvn -B --no-transfer-progress -P release \
