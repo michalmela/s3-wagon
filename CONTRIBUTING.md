@@ -16,6 +16,19 @@ mise run test
 `mise run verify` additionally runs the integration tests against a MinIO container and the static
 analysis. It needs Docker; without it the integration tests skip rather than fail.
 
+`mise.lock` records a checksum for every pinned tool on every platform, and `mise install` refuses
+to install anything that does not match. Without it mise still checksums downloads, but it fetches
+the expected digest from the same server as the download, so the two agree even if that server is
+lying; the lockfile is what makes the digest something this repository asserts. After changing a
+version in `mise.toml`, regenerate it:
+
+```sh
+mise lock
+```
+
+Commit the result. Do not hand-edit it, and treat an unexplained checksum change in a diff the way
+you would treat an unexplained change to a pinned action SHA.
+
 ## Before opening a pull request
 
 ```sh
