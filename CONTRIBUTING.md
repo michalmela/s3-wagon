@@ -227,6 +227,35 @@ uploads, release-please and the Clojars deploy all need the real GitHub. And for
 bugs a container is more decisive than act — `sh` on the runner is dash, which rejects
 `set -o pipefail`, so an inline mise task without a bash shebang fails there and nowhere on macOS.
 
+## Fuzzing
+
+Three targets live in `src/fuzz/java`, run by
+[ClusterFuzzLite](https://google.github.io/clusterfuzzlite/): briefly on pull requests that touch
+`src/main`, and for ten minutes weekly. They assert properties rather than merely looking for
+crashes — that a key prefix never starts with a slash and normalising it twice changes nothing,
+that a proxy endpoint either parses with a host or reports why not, that no non-proxy host entry is
+blank.
+
+`S3WagonInvariantsTest` checks the same properties against randomised input on every build, so the
+invariants are enforced without waiting for a scheduled fuzzing run.
+
+To build and run them locally the way CI does:
+
+```sh
+docker build --platform linux/amd64 -t s3-wagon-cfl -f .clusterfuzzlite/Dockerfile .
+docker run --rm --platform linux/amd64 s3-wagon-cfl bash -c \
+  'export OUT=/out WORK=/work && mkdir -p $OUT $WORK && $SRC/build.sh \
+   && cp /usr/local/bin/jazzer_driver /usr/local/bin/jazzer_agent_deploy.jar $OUT/ \
+   && cd $OUT && ./BaseDirectoryFuzzer -runs=10000'
+```
+
+The image is amd64, so on Apple silicon this runs emulated and slowly. The `jazzer_driver` copy is
+what the OSS-Fuzz `compile` wrapper does for you in CI; `build.sh` deliberately does not.
+
+Between them these found three bugs the ordinary tests had missed: an `IllegalArgumentException`
+escaping connect on a malformed proxy host, a base directory whose normalisation was not idempotent,
+and a non-proxy host entry that trimmed away to an empty string.
+
 ## Repository settings these workflows expect
 
 Two workflows are wired up but depend on a setting only a repository admin can flip:

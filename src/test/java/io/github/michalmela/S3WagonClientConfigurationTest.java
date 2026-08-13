@@ -98,6 +98,19 @@ class S3WagonClientConfigurationTest {
                 S3Wagon.nonProxyHosts(proxy));
     }
 
+    /**
+     * Found by Jazzer. isNotBlank goes by Character.isWhitespace, which does not treat control
+     * characters as blank, but trim strips everything up to U+0020 - so this entry survived the
+     * blank check and then trimmed away to an empty string in the result.
+     */
+    @Test
+    void dropsEntriesThatTrimAwayToNothing() {
+        ProxyInfo proxy = new ProxyInfo();
+        proxy.setNonProxyHosts("localhost|\n\u001a|,10.0.0.1");
+
+        assertEquals(new HashSet<>(Arrays.asList("localhost", "10.0.0.1")), S3Wagon.nonProxyHosts(proxy));
+    }
+
     @Test
     void toleratesMissingNonProxyHosts() {
         assertEquals(Collections.emptySet(), S3Wagon.nonProxyHosts(new ProxyInfo()));

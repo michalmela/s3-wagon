@@ -1,0 +1,37 @@
+name: ClusterFuzzLite PR
+
+on:
+  pull_request:
+    paths:
+      - "src/main/**"
+      - "src/fuzz/**"
+      - ".clusterfuzzlite/**"
+      - pom.xml
+
+permissions: read-all
+
+jobs:
+  fuzz:
+    name: Fuzz changed code
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [address]
+    steps:
+      - name: Build fuzzers
+        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: jvm
+          sanitizer: ${{ matrix.sanitizer }}
+
+      # Short by design: a pull request should not wait on a fuzzing campaign.
+      # The scheduled run is where the corpus actually grows.
+      - name: Run fuzzers
+        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fuzz-seconds: 120
+          mode: code-change
+          sanitizer: ${{ matrix.sanitizer }}
+          output-sarif: true

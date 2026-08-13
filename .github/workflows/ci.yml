@@ -36,8 +36,11 @@ jobs:
           key: ${{ runner.os }}-maven-${{ hashFiles('pom.xml') }}
           restore-keys: ${{ runner.os }}-maven-
 
-      # These workflows were only ever linted by hand before.
+      # These workflows were only ever linted by hand before. pinact's --verify
+      # queries the GitHub API, which needs a token to stay inside the rate limit.
       - name: Lint
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: mise run lint
 
       # Includes the MinIO integration tests; the runner provides Docker.

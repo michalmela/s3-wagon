@@ -126,7 +126,15 @@ description = "Check every GitHub Action is pinned to a commit SHA"
 # --check fails rather than rewriting, which is what CI wants. --verify also
 # confirms each SHA really is the version the comment claims, so a pin cannot
 # quietly drift from its label.
-run = "pinact run --check --verify"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+# --verify asks the GitHub API whether each SHA really is the tagged version, and
+# unauthenticated requests run out of rate limit quickly. CI supplies GITHUB_TOKEN;
+# locally, borrow the gh CLI's.
+export GITHUB_TOKEN="${GITHUB_TOKEN:-$(gh auth token 2>/dev/null || true)}"
+pinact run --check --verify
+"""
 sources = [".github/workflows/*.yml", ".pinact.yaml"]
 outputs = { auto = true }
 

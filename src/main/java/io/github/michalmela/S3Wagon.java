@@ -462,13 +462,21 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
         if (basedir == null) {
             return "";
         }
-        String prefix = basedir.trim();
-        while (prefix.startsWith("/")) {
-            prefix = prefix.substring(1);
-        }
-        while (prefix.endsWith("/")) {
-            prefix = prefix.substring(0, prefix.length() - 1);
-        }
+        // Trimming and slash-stripping have to run to a fixed point: "/ foo" strips to " foo",
+        // whose leading space only a second trim removes. One pass left the result depending on
+        // how many times the value had been normalised.
+        String prefix = basedir;
+        String previous;
+        do {
+            previous = prefix;
+            prefix = prefix.trim();
+            while (prefix.startsWith("/")) {
+                prefix = prefix.substring(1);
+            }
+            while (prefix.endsWith("/")) {
+                prefix = prefix.substring(0, prefix.length() - 1);
+            }
+        } while (!prefix.equals(previous));
         return prefix.isEmpty() ? "" : prefix + "/";
     }
 
@@ -1268,7 +1276,13 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
         // attached, which is never meaningful and would otherwise be rejected below.
         String host = proxyInfo.getHost().trim();
         try {
-            return new URI(scheme + "://" + host + ":" + proxyInfo.getPort());
+            URI endpoint = new URI(scheme + "://" + host + ":" + proxyInfo.getPort());
+            // A host containing '/' parses as a URI but ends up with no host at all, which is the
+            // same silently-ignored proxy as a missing scheme, reached a different way.
+            if (endpoint.getHost() == null) {
+                throw new ConnectionException("proxy host \"" + host + "\" is not a usable host name");
+            }
+            return endpoint;
         } catch (URISyntaxException e) {
             // A space, a pipe or a stray percent is enough. Left unchecked this escaped connect as
             // an IllegalArgumentException, which says nothing about the proxy being at fault.
@@ -1284,8 +1298,12 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
         }
         Set<String> hosts = new LinkedHashSet<>();
         for (String host : nonProxyHosts.split("[|,]")) {
-            if (isNotBlank(host)) {
-                hosts.add(host.trim());
+            // Trim first, then test. isNotBlank goes by Character.isWhitespace, which does not
+            // consider control characters blank, while trim strips everything up to U+0020 - so
+            // an entry of control characters passed the test and then trimmed away to nothing.
+            String trimmed = host.trim();
+            if (!trimmed.isEmpty()) {
+                hosts.add(trimmed);
             }
         }
         return hosts;
