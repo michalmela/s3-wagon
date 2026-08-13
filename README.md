@@ -211,6 +211,29 @@ Coming from 1.0.x, two changes need action on your side: repository URLs without
 slash now resolve to different S3 keys, and uploads carry a checksum trailer some S3-compatible
 stores reject. Both are written up in [UPGRADING.md](UPGRADING.md).
 
+## Reproducible builds
+
+The published artifacts are byte-for-byte reproducible: rebuilding a release tag from source
+produces exactly the jars that were published, so you do not have to take this repository's word
+for what is inside them.
+
+```sh
+git checkout 1.1.0
+mise install
+mise run verify:reproducible
+```
+
+That rebuilds and compares against the artifacts on Clojars, failing if a single byte differs.
+Every release carries a `.buildinfo` recording the toolchain and a checksum per artifact, and
+[`.buildspec`](.buildspec) is the same recipe in the format
+[Reproducible Central](https://github.com/jvm-repo-rebuild/reproducible-central) consumes.
+
+Reproducibility holds across operating system, CPU architecture, JDK vendor, locale and timezone.
+It does *not* hold across JDK major versions - javac names synthetic members differently between
+them - so a rebuild needs the major version named in `.buildspec`, which is the one pinned in
+`mise.toml`. `mise install` gives you exactly that JDK, verified against the checksum in
+`mise.lock`.
+
 ## Releasing
 
 Releases are automated: conventional commits on `master` drive a release pull request that bumps the

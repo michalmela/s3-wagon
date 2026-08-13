@@ -38,6 +38,7 @@
         <maven-javadoc-plugin.version>3.12.0</maven-javadoc-plugin.version>
         <maven-gpg-plugin.version>3.2.8</maven-gpg-plugin.version>
         <cyclonedx-maven-plugin.version>2.9.3</cyclonedx-maven-plugin.version>
+        <maven-artifact-plugin.version>3.6.1</maven-artifact-plugin.version>
         <!-- Fixed timestamp makes the jar byte-for-byte reproducible. -->
         <project.build.outputTimestamp>2026-08-11T00:00:00Z</project.build.outputTimestamp>
         <testcontainers.version>1.21.4</testcontainers.version>
@@ -301,6 +302,37 @@
                         <id>attach-sources</id>
                         <goals>
                             <goal>jar-no-fork</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-artifact-plugin</artifactId>
+                <version>${maven-artifact-plugin.version}</version>
+                <configuration>
+                    <!-- The plugin drops javadoc by default, because for most projects it is
+                         the one artifact that will not reproduce. This one does, so record it
+                         and let a rebuild prove it. -->
+                    <ignoreJavadoc>false</ignoreJavadoc>
+                    <!-- Same reason as the SBOM above: Clojars rejects a .buildinfo upload, so
+                         it rides on the GitHub release instead of the Maven repository. -->
+                    <attach>false</attach>
+                    <!-- Record "Unix" and a JDK major version rather than this machine's exact
+                         OS build, so the buildinfo is itself reproducible. Without this it
+                         would be the one attached file that never matches on a rebuild. -->
+                    <reproducible>true</reproducible>
+                </configuration>
+                <executions>
+                    <execution>
+                        <!-- Records the toolchain and a checksum per artifact, so anyone can
+                             rebuild and prove they got the same bytes. Generated on every
+                             verify rather than only on release, so a change that breaks
+                             reproducibility shows up in CI instead of at publish time. -->
+                        <id>buildinfo</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>buildinfo</goal>
                         </goals>
                     </execution>
                 </executions>

@@ -84,6 +84,29 @@ There are four, and they catch different things:
 A change to what goes over the wire deserves more than the first row. The in-memory client cannot
 see content encodings, checksum trailers, or signing — regressions have hidden in exactly that gap.
 
+## Reproducible builds
+
+Every `mvn verify` writes `target/*.buildinfo`, recording the toolchain and a checksum per
+artifact. `mise run verify:reproducible` rebuilds a released version and compares it against what
+is published on Clojars, failing if a byte differs.
+
+Reproducibility survives a change of OS, CPU architecture, JDK vendor, locale and timezone, but not
+a change of JDK *major* version: javac numbers lambdas and synthetic accessors differently between
+releases, so the same source yields different `S3Wagon.class` bytes on JDK 21 and JDK 26. The
+supported major version is recorded in `.buildspec` and pinned in `mise.toml`.
+
+Clojars accepts only `.pom`, `.jar`, `.sha1`, `.md5`, `.asc`, `.module` and `.sig` uploads —
+anything else is a 400 that fails the entire deploy. That is why the SBOM and the `.buildinfo` are
+built but *not* attached to the Maven project: they ride on the GitHub release instead. Before
+adding a plugin that attaches an artifact, check what extension it produces.
+
+Two things break reproducibility if changed carelessly:
+
+* `project.build.outputTimestamp` in `pom.xml` — a fixed timestamp is what keeps jar entries
+  stable. Do not replace it with anything derived from the clock.
+* the JDK pin in `mise.toml` — bumping the major version is fine, but it means artifacts built
+  before and after will not match, so bump `jdk=` in `.buildspec` in the same commit.
+
 ## Releasing
 
 Releases are driven by [release-please](https://github.com/googleapis/release-please), which reads
