@@ -243,6 +243,11 @@
                          and makes a vulnerability in the host's copy look like one in ours. -->
                     <includeProvidedScope>false</includeProvidedScope>
                     <includeTestScope>false</includeTestScope>
+                    <!-- Clojars only accepts .pom, .jar, .sha1, .md5, .asc, .module and .sig
+                         uploads; anything else is a 400 that fails the whole deploy. The SBOM
+                         still gets built and attached to the GitHub release, which is where
+                         people actually look for it. -->
+                    <skipAttach>true</skipAttach>
                 </configuration>
                 <executions>
                     <execution>
