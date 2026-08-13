@@ -6,6 +6,7 @@ actionlint = "1.7.12"
 # really runs on the Java 8 bytecode level it ships.
 java = ["zulu-26.32.13.0", "zulu-8.96.0.19"]
 maven = "3.9.16"
+pinact = "3.9.0"
 
 [env]
 # Keep the local repository resolution reproducible across machines and CI.
