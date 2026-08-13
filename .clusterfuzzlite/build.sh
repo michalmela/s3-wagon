@@ -26,6 +26,9 @@ javac -cp "$CLASSPATH_JARS:$JAZZER_API_PATH" -d "$OUT/fuzz-classes" \
 for target in BaseDirectoryFuzzer ProxyEndpointFuzzer NonProxyHostsFuzzer; do
   cat > "$OUT/$target" <<LAUNCHER
 #!/bin/bash
+# LLVMFuzzerTestOneInput -- ClusterFuzzLite decides what in \$OUT is a fuzz target by
+# looking for a name ending in _fuzzer or for this string in the file. Ours are named
+# *Fuzzer, so without this line the build succeeds and then nothing is found to run.
 this_dir=\$(dirname "\$0")
 LD_LIBRARY_PATH="\$JVM_LD_LIBRARY_PATH":\$this_dir \\
 \$this_dir/jazzer_driver \\
