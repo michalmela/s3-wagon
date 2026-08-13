@@ -235,6 +235,29 @@ Two workflows are wired up but depend on a setting only a repository admin can f
 * **Renovate** — `renovate.json` is only read once the Renovate GitHub App is installed on the
   repository. Until then nothing opens dependency pull requests.
 
+### Required status checks
+
+These can only be configured once the workflows have run on `master`, because GitHub offers checks
+it has seen report. So merge first, then add them.
+
+Safe to require — every one of these runs on every pull request:
+
+| Check | From |
+|---|---|
+| `Verify` | unit tests, MinIO integration tests, SpotBugs, linters |
+| `Runtime on Java 8`, `11`, `17`, `21`, `25` | the shipped jar loading on each JDK |
+| `Deploy and resolve on Maven 3.9.16` | a real deploy and resolve through the wagon |
+| `Deploy and resolve on Maven 4.0.0-rc-6` | the same, on Maven 4 |
+| `Scan dependencies` | OSV against the SBOM |
+
+**Do not require `Fuzz changed code`.** It is path-filtered to `src/main`, `src/fuzz`,
+`.clusterfuzzlite` and `pom.xml`, so it does not run on a documentation-only change — and a required
+check that never reports blocks the pull request forever. The same applies to anything in
+`javadoc`, `release`, `release-please` or `cflite-batch`, none of which run on pull requests at all.
+
+`Scorecard analysis` does run on pull requests, but it grades repository practices rather than the
+change, so requiring it mostly means a red mark for things a single pull request cannot fix.
+
 OpenSSF Scorecard needs nothing: it runs on pushes to `master` and weekly, and publishes its results
 for a public repository. The badge for it is deliberately absent from the README until the first run
 produces data, because it would render broken before that.
