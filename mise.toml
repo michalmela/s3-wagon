@@ -55,10 +55,18 @@ flag "--java <java>" help="mise java version to run the wagon on" default="zulu-
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
-mvn -q dependency:build-classpath -Dmdep.outputFile=target/runtime-classpath.txt -Dmdep.includeScope=runtime
+# compile scope, which the dependency plugin reads as compile plus provided: that is
+# what a host actually puts in front of the wagon, wagon-provider-api included. The
+# property is includeScope, not mdep.includeScope - the prefixed spelling is silently
+# ignored, which had this check running with the whole test classpath instead.
+mvn -q dependency:build-classpath -Dmdep.outputFile=target/runtime-classpath.txt -DincludeScope=compile
+# Maven and Leiningen both bring an SLF4J binding; without one here the check prints a
+# missing-binding warning that no real user would ever see.
+mvn -q dependency:build-classpath -Dmdep.outputFile=target/binding-classpath.txt \
+  -DincludeScope=test -DincludeArtifactIds=slf4j-simple
 # The build also produces -sources and -javadoc jars; neither carries classes.
 jar=$(ls target/s3-wagon-*.jar | grep -vE -- "-(sources|javadoc)\\.jar$" | head -1)
-cp="$jar:$(cat target/runtime-classpath.txt)"
+cp="$jar:$(cat target/runtime-classpath.txt):$(cat target/binding-classpath.txt)"
 mkdir -p target/runtime-check
 # Compiled by the modern JDK at release 8, then run on the JDK under test.
 javac --release 8 -nowarn -cp "$cp" -d target/runtime-check src/verify/java8/Java8SmokeCheck.java

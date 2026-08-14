@@ -6,6 +6,8 @@
       "package-name": "s3-wagon",
       "changelog-path": "CHANGES.md",
       "include-v-in-tag": false,
+      "//include-component-in-tag": "Defaults to true, which tags a release s3-wagon-1.1.0 rather than 1.1.0. That silently broke the 1.1.0 release: the Release workflow triggers on tags matching [0-9]*, so it never ran and nothing reached Clojars. Plain tags also match 1.0.0 through 1.0.2 and the gitTag in .buildspec.",
+      "include-component-in-tag": false,
       "changelog-sections": [
         {
           "type": "feat",
