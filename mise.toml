@@ -139,6 +139,27 @@ pinact run --check --verify
 sources = [".github/workflows/*.yml", ".pinact.yaml"]
 outputs = { auto = true }
 
+[tasks.format]
+description = "Reformat the sources"
+run = "mvn spotless:apply"
+
+[tasks."lint:format"]
+description = "Check formatting without changing anything"
+# The same check the build runs, on its own so pre-commit reports it in seconds
+# rather than at the end of a full verify. `mise run format` fixes what it finds.
+run = "mvn -q spotless:check"
+sources = [
+    "pom.xml",
+    ".eclipse-format.prefs",
+    "src/**/*.java",
+    "*.md",
+    ".github/**/*.yml",
+    "mise-tasks/**",
+    "mise.toml",
+    ".buildspec",
+]
+outputs = { auto = true }
+
 [tasks."lint:actions"]
 description = "Lint the GitHub Actions workflows"
 run = "actionlint"
@@ -149,6 +170,15 @@ outputs = { auto = true }
 description = "Run every linter"
 depends = ["lint:*"]
 
+[tasks."verify:quick"]
+description = "Everything CI verifies except the integration tests, which need Docker"
+# The unit tests plus static analysis, formatting, javadoc and the SBOM - in one
+# JVM, which is faster than invoking Maven once per check.
+run = "mvn verify -DskipITs"
+
 [tasks.pre-commit]
 description = "Checks that run before every commit"
-depends = ["lint", "test"]
+# Deliberately everything CI would reject the change for, short of the integration
+# tests: those want Docker, and a pre-commit hook that fails when Docker is not
+# running is a pre-commit hook people disable.
+depends = ["lint", "verify:quick"]

@@ -37,6 +37,7 @@
         <maven-gpg-plugin.version>3.2.8</maven-gpg-plugin.version>
         <cyclonedx-maven-plugin.version>2.9.3</cyclonedx-maven-plugin.version>
         <maven-artifact-plugin.version>3.6.1</maven-artifact-plugin.version>
+        <spotless-maven-plugin.version>2.44.5</spotless-maven-plugin.version>
         <!-- Fixed timestamp makes the jar byte-for-byte reproducible. -->
         <project.build.outputTimestamp>2026-08-11T00:00:00Z</project.build.outputTimestamp>
         <testcontainers.version>1.21.4</testcontainers.version>
@@ -339,6 +340,57 @@
                         <phase>verify</phase>
                         <goals>
                             <goal>buildinfo</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>com.diffplug.spotless</groupId>
+                <artifactId>spotless-maven-plugin</artifactId>
+                <version>${spotless-maven-plugin.version}</version>
+                <configuration>
+                    <java>
+                        <!-- Wider than the default source roots: this project also keeps benchmark,
+                             fuzz and runtime-check sources under src/, and they are code too. -->
+                        <includes>
+                            <include>src/*/java*/**/*.java</include>
+                        </includes>
+                        <eclipse>
+                            <file>${project.basedir}/.eclipse-format.prefs</file>
+                        </eclipse>
+                        <removeUnusedImports>
+                            <!-- The default engine is google-java-format, which cannot run on this
+                                 project's JDK; this one parses with JavaParser instead. -->
+                            <engine>cleanthat-javaparser-unnecessaryimport</engine>
+                        </removeUnusedImports>
+                        <trimTrailingWhitespace/>
+                        <endWithNewline/>
+                    </java>
+                    <formats>
+                        <!-- Everything else that is text under version control: no opinion about
+                             its content, only that it does not carry trailing whitespace and does
+                             end with a newline. -->
+                        <format>
+                            <includes>
+                                <include>*.md</include>
+                                <include>.github/**/*.yml</include>
+                                <include>mise-tasks/**</include>
+                                <include>mise.toml</include>
+                                <include>.buildspec</include>
+                            </includes>
+                            <trimTrailingWhitespace/>
+                            <endWithNewline/>
+                        </format>
+                    </formats>
+                </configuration>
+                <executions>
+                    <execution>
+                        <!-- Bound to verify rather than validate so an ordinary mvn test stays
+                             fast; CI runs verify, so nothing unformatted reaches master. -->
+                        <id>check</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>check</goal>
                         </goals>
                     </execution>
                 </executions>

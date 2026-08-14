@@ -1,0 +1,31 @@
+# Eclipse JDT formatter settings, used by spotless (see pom.xml).
+#
+# Why JDT and not google-java-format or palantir-java-format: both of those drive
+# javac internals, and both fail outright on the JDK this project pins -
+# NoSuchMethodError on com.sun.tools.javac.util.Log$DeferredDiagnosticHandler.
+# JDT has its own parser and does not care which JDK it runs on.
+#
+# These values were chosen to match the code as it was already written by hand, so
+# adopting the formatter moved fifteen lines rather than four thousand.
+org.eclipse.jdt.core.formatter.lineSplit=120
+org.eclipse.jdt.core.formatter.tabulation.char=space
+org.eclipse.jdt.core.formatter.tabulation.size=4
+org.eclipse.jdt.core.formatter.indentation.size=4
+
+# Comments are prose here, wrapped deliberately. Reflowing them to the column limit
+# rewrote every javadoc paragraph in the project and read worse for it.
+org.eclipse.jdt.core.formatter.comment.format_javadoc_comments=false
+org.eclipse.jdt.core.formatter.comment.format_block_comments=false
+org.eclipse.jdt.core.formatter.comment.format_line_comments=false
+org.eclipse.jdt.core.formatter.join_wrapped_lines=false
+org.eclipse.jdt.core.formatter.join_lines_in_comments=false
+
+# Default JDT writes "case FOO :".
+org.eclipse.jdt.core.formatter.insert_space_before_colon_in_case=false
+org.eclipse.jdt.core.formatter.insert_space_before_colon_in_default=false
+
+# Without these, a long declaration gets joined onto one line and then cannot be
+# split again, producing lines past the limit the formatter itself enforces.
+org.eclipse.jdt.core.formatter.alignment_for_assignment=16
+org.eclipse.jdt.core.formatter.alignment_for_parameterized_type_references=16
+org.eclipse.jdt.core.formatter.alignment_for_type_arguments=16

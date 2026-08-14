@@ -499,7 +499,8 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
             downloadChunkSize();
             downloadThreshold();
         } catch (NumberFormatException e) {
-            throw new ConnectionException("multipartThreshold, multipartPartSize, multipartConcurrency and retries must all be numbers", e);
+            throw new ConnectionException(
+                    "multipartThreshold, multipartPartSize, multipartConcurrency and retries must all be numbers", e);
         }
     }
 
@@ -596,7 +597,8 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
     }
 
     @Override
-    public boolean getIfNewer(String resourceName, File destination, long timestamp) throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
+    public boolean getIfNewer(String resourceName, File destination, long timestamp)
+            throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
         if (timestamp == 0 || isNewer(resourceName, timestamp)) {
             get(resourceName, destination);
             return true;
@@ -605,7 +607,8 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
     }
 
     @Override
-    public void get(String resourceName, File destination) throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
+    public void get(String resourceName, File destination)
+            throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
         Resource resource = new Resource(resourceName);
         this.fireGetInitiated(resource, destination);
         download(resourceName, resource, destination, null);
@@ -680,7 +683,8 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
     }
 
     @Override
-    public void put(File source, String destination) throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
+    public void put(File source, String destination)
+            throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
         Resource resource = new Resource(destination);
         resource.setContentLength(source.length());
         resource.setLastModified(source.lastModified());
@@ -964,8 +968,8 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
             List<Future<CompletedPart>> futures = new ArrayList<>();
             for (int partNumber = 1; partNumber <= partCount; partNumber++) {
                 int part = partNumber;
-                futures.add(pool.submit(() ->
-                        uploadSinglePart(source, destination, resource, uploadId, partSize, part, source.length())));
+                futures.add(pool.submit(() -> uploadSinglePart(source, destination, resource, uploadId, partSize, part,
+                        source.length())));
             }
             List<CompletedPart> parts = new ArrayList<>();
             for (Future<CompletedPart> future : futures) {
@@ -1222,7 +1226,8 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
         this.baseDirectory = null;
     }
 
-    private boolean isNewer(String resourceName, long timestamp) throws ResourceDoesNotExistException, AuthorizationException, TransferFailedException {
+    private boolean isNewer(String resourceName, long timestamp)
+            throws ResourceDoesNotExistException, AuthorizationException, TransferFailedException {
         try {
             HeadObjectResponse headObject = headObject(resourceName);
             return headObject.lastModified().toEpochMilli() > timestamp;
@@ -1502,8 +1507,8 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
         }
         String prefix = destinationDirectory == null || destinationDirectory.isEmpty()
                 || ".".equals(destinationDirectory)
-                ? ""
-                : destinationDirectory.endsWith("/") ? destinationDirectory : destinationDirectory + "/";
+                        ? ""
+                        : destinationDirectory.endsWith("/") ? destinationDirectory : destinationDirectory + "/";
         putDirectoryContents(sourceDirectory, prefix);
     }
 
