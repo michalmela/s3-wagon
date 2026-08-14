@@ -1,17 +1,29 @@
 package io.github.michalmela;
 
 import org.apache.maven.wagon.AbstractWagon;
+import org.apache.maven.wagon.ConnectionException;
 import org.apache.maven.wagon.ResourceDoesNotExistException;
+import org.apache.maven.wagon.StreamingWagon;
 import org.apache.maven.wagon.TransferFailedException;
 import org.apache.maven.wagon.authentication.AuthenticationInfo;
 import org.apache.maven.wagon.authorization.AuthorizationException;
+import org.apache.maven.wagon.events.TransferEvent;
 import org.apache.maven.wagon.proxy.ProxyInfo;
 import org.apache.maven.wagon.resource.Resource;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.AwsCredentials;
+import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
+import software.amazon.awssdk.auth.credentials.AwsSessionCredentials;
+import software.amazon.awssdk.auth.credentials.ProfileCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.awscore.exception.AwsServiceException;
+import software.amazon.awssdk.awscore.retry.AwsRetryStrategy;
 import software.amazon.awssdk.core.ResponseInputStream;
+import software.amazon.awssdk.core.checksums.RequestChecksumCalculation;
+import software.amazon.awssdk.core.exception.SdkClientException;
+import software.amazon.awssdk.core.exception.SdkException;
 import software.amazon.awssdk.core.sync.RequestBody;
+import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.http.SdkHttpClient;
 import software.amazon.awssdk.http.apache.ApacheHttpClient;
 import software.amazon.awssdk.http.apache.ProxyConfiguration;
@@ -20,29 +32,452 @@ import software.amazon.awssdk.services.s3.S3ClientBuilder;
 import software.amazon.awssdk.services.s3.model.*;
 import software.amazon.awssdk.services.sso.auth.ExpiredTokenException;
 
+import java.io.BufferedInputStream;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FilterInputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.RandomAccessFile;
 import java.net.URI;
+import java.net.URISyntaxException;
+import java.nio.ByteBuffer;
+import java.nio.channels.Channels;
+import java.nio.channels.FileChannel;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.function.Function;
 
 import static software.amazon.awssdk.utils.StringUtils.isNotBlank;
 
-public final class S3Wagon extends AbstractWagon {
+public final class S3Wagon extends AbstractWagon implements StreamingWagon {
 
-    private volatile S3Client s3;
+    /** S3 accepts at most 10000 parts in a multipart upload. */
+    private static final int MAX_PARTS = 10_000;
 
-    private volatile String bucket;
+    private static final long DEFAULT_MULTIPART_CONCURRENCY = 4;
 
-    private volatile String baseDirectory;
+    /**
+     * Off by default. Ranged downloads only pay off for large artifacts over a high-latency link,
+     * and unlike uploads they change what transfer listeners observe - see setDownloadConcurrency.
+     */
+    private static final long DEFAULT_DOWNLOAD_CONCURRENCY = 1;
+
+    private static final long DEFAULT_DOWNLOAD_CHUNK_SIZE = 16L * 1024 * 1024;
+
+    private static final long MINIMUM_DOWNLOAD_CHUNK_SIZE = 1024L * 1024;
+
+    private static final long DEFAULT_DOWNLOAD_THRESHOLD = 32L * 1024 * 1024;
+
+    /** More connections than the HTTP client's default pool would only queue. */
+    private static final int MAX_MULTIPART_CONCURRENCY = 16;
+
+    /** Artifacts bigger than this are uploaded in parts. */
+    private static final long DEFAULT_MULTIPART_THRESHOLD = 100L * 1024 * 1024;
+
+    private static final long DEFAULT_MULTIPART_PART_SIZE = 16L * 1024 * 1024;
+
+    /** S3 rejects parts smaller than 5MB, except for the last one. */
+    private static final long MINIMUM_PART_SIZE = 5L * 1024 * 1024;
+
+    private S3Client s3;
+
+    private String bucket;
+
+    private String baseDirectory;
+
+    /**
+     * Client supplied by tests; when null a real client is built on connect.
+     */
+    private final S3Client injectedClient;
+
+    // Settings, injected by Plexus from a <server><configuration> block in settings.xml. Each one
+    // also falls back to a system property and then an environment variable, because Leiningen has
+    // no way to pass wagon configuration through.
+    private String region;
+    private String endpoint;
+    private Boolean pathStyleAccess;
+    private String serverSideEncryption;
+    private String sseKmsKeyId;
+    private String cannedAcl;
+    private String requestChecksumCalculation;
+    private String multipartThreshold;
+    private String multipartPartSize;
+    private String sessionToken;
+    private String profile;
+    private String multipartConcurrency;
+    private String storageClass;
+    private String objectTags;
+    private String retries;
+    private String downloadConcurrency;
+    private String downloadChunkSize;
+    private String downloadThreshold;
+
+    /** Overridden by tests; environment variables cannot be set in-process. */
+    private Function<String, String> environment = System::getenv;
+
+    /**
+     * Guards transfer-progress events, which concurrent transfers would otherwise interleave.
+     *
+     * <p>Only {@link #reportProgress} touches it. Reaching it from the inner stream class would
+     * make the compiler generate an accessor for it, which hands the lock to anything that can see
+     * the class.
+     */
+    private final Object progressLock = new Object();
+
+    /** Fires one progress event, serialised against every other concurrent transfer. */
+    private void reportProgress(Resource resource, int requestType, byte[] buffer, int read) {
+        TransferEvent event = new TransferEvent(this, resource, TransferEvent.TRANSFER_PROGRESS, requestType);
+        synchronized (progressLock) {
+            fireTransferProgress(event, buffer, read);
+        }
+    }
+
+    private ServerSideEncryption encryption;
+    private ObjectCannedACL acl;
+    private RequestChecksumCalculation checksumCalculation;
+
+    public S3Wagon() {
+        this(null);
+    }
+
+    S3Wagon(S3Client injectedClient) {
+        this.injectedClient = injectedClient;
+    }
 
     @Override
-    protected void openConnectionInternal() {
+    protected void openConnectionInternal() throws ConnectionException {
         if (this.s3 == null) {
             this.bucket = repository.getHost();
-            String basedir = repository.getBasedir();
-            this.baseDirectory = basedir.startsWith("/") ? basedir.substring(1) : basedir;
-            this.s3 = s3(authenticationInfo, awsHttpClient(getProxyInfo()));
+            this.baseDirectory = baseDirectory(repository.getBasedir());
+            // Resolved once per connection so that a misspelled value fails immediately, with a
+            // message naming the setting, rather than part-way through a deploy.
+            this.encryption = encryption(serverSideEncryption());
+            this.acl = cannedAcl(cannedAcl());
+            this.checksumCalculation = checksumCalculation(requestChecksumCalculation());
+            validateSizes();
+            this.s3 = injectedClient != null
+                    ? injectedClient
+                    : s3(authenticationInfo, awsHttpClient(getProxyInfo()));
+            describeConnection();
         }
+    }
+
+    /**
+     * Explains what the wagon resolved before anything is transferred.
+     *
+     * <p>Failures here are nearly always configuration - the wrong endpoint, the wrong credentials,
+     * a prefix that is not what the user thought. Running Maven with -X should answer that without
+     * anyone having to guess.
+     */
+    private void describeConnection() {
+        fireTransferDebug("s3-wagon: bucket=" + bucket
+                + " prefix=" + (baseDirectory.isEmpty() ? "<root>" : baseDirectory)
+                + " region=" + (region() == null ? "<from provider chain>" : region())
+                + " endpoint=" + (endpoint() == null ? "<aws>" : endpoint())
+                + " pathStyleAccess=" + (pathStyleAccess() == null ? "<default>" : pathStyleAccess())
+                + " credentials=" + credentialsSource()
+                + " connectTimeout=" + getTimeout() + "ms readTimeout=" + getReadTimeout() + "ms");
+        if (encryption != null || acl != null) {
+            fireTransferDebug("s3-wagon: serverSideEncryption=" + encryption + " cannedAcl=" + acl);
+        }
+    }
+
+    private String credentialsSource() {
+        if (hasMinimumRequiredFields(authenticationInfo)) {
+            return sessionToken() != null ? "settings.xml (with session token)" : "settings.xml";
+        }
+        return profile() != null ? "profile " + profile() : "default provider chain";
+    }
+
+    public void setRegion(String region) {
+        this.region = region;
+    }
+
+    public void setEndpoint(String endpoint) {
+        this.endpoint = endpoint;
+    }
+
+    public void setPathStyleAccess(boolean pathStyleAccess) {
+        this.pathStyleAccess = pathStyleAccess;
+    }
+
+    public void setServerSideEncryption(String serverSideEncryption) {
+        this.serverSideEncryption = serverSideEncryption;
+    }
+
+    public void setSseKmsKeyId(String sseKmsKeyId) {
+        this.sseKmsKeyId = sseKmsKeyId;
+    }
+
+    public void setCannedAcl(String cannedAcl) {
+        this.cannedAcl = cannedAcl;
+    }
+
+    public void setRequestChecksumCalculation(String requestChecksumCalculation) {
+        this.requestChecksumCalculation = requestChecksumCalculation;
+    }
+
+    public void setMultipartThreshold(String multipartThreshold) {
+        this.multipartThreshold = multipartThreshold;
+    }
+
+    public void setMultipartPartSize(String multipartPartSize) {
+        this.multipartPartSize = multipartPartSize;
+    }
+
+    public void setSessionToken(String sessionToken) {
+        this.sessionToken = sessionToken;
+    }
+
+    public void setProfile(String profile) {
+        this.profile = profile;
+    }
+
+    public void setMultipartConcurrency(String multipartConcurrency) {
+        this.multipartConcurrency = multipartConcurrency;
+    }
+
+    public void setStorageClass(String storageClass) {
+        this.storageClass = storageClass;
+    }
+
+    public void setObjectTags(String objectTags) {
+        this.objectTags = objectTags;
+    }
+
+    public void setRetries(String retries) {
+        this.retries = retries;
+    }
+
+    /**
+     * Number of ranged GETs to run at once for a large download; 1 (the default) disables it.
+     *
+     * <p>Splitting a download means transfer listeners see the bytes out of order. Listeners that
+     * only count bytes - which is what Maven's progress reporting does - are unaffected, but a
+     * listener that digests the stream as it arrives, such as Wagon's own {@code ChecksumObserver},
+     * would produce a wrong result. That is why this is off unless asked for.
+     */
+    public void setDownloadConcurrency(String downloadConcurrency) {
+        this.downloadConcurrency = downloadConcurrency;
+    }
+
+    public void setDownloadChunkSize(String downloadChunkSize) {
+        this.downloadChunkSize = downloadChunkSize;
+    }
+
+    public void setDownloadThreshold(String downloadThreshold) {
+        this.downloadThreshold = downloadThreshold;
+    }
+
+    void setEnvironment(Function<String, String> environment) {
+        this.environment = environment;
+    }
+
+    String region() {
+        return setting(region, "s3wagon.region", "S3WAGON_REGION");
+    }
+
+    String endpoint() {
+        return setting(endpoint, "s3wagon.endpoint", "S3WAGON_ENDPOINT");
+    }
+
+    String serverSideEncryption() {
+        return setting(serverSideEncryption, "s3wagon.serverSideEncryption", "S3WAGON_SERVER_SIDE_ENCRYPTION");
+    }
+
+    String sseKmsKeyId() {
+        return setting(sseKmsKeyId, "s3wagon.sseKmsKeyId", "S3WAGON_SSE_KMS_KEY_ID");
+    }
+
+    String cannedAcl() {
+        return setting(cannedAcl, "s3wagon.cannedAcl", "S3WAGON_CANNED_ACL");
+    }
+
+    String requestChecksumCalculation() {
+        return setting(requestChecksumCalculation,
+                "s3wagon.requestChecksumCalculation", "S3WAGON_REQUEST_CHECKSUM_CALCULATION");
+    }
+
+    String sessionToken() {
+        return setting(sessionToken, "s3wagon.sessionToken", "S3WAGON_SESSION_TOKEN");
+    }
+
+    String profile() {
+        return setting(profile, "s3wagon.profile", "S3WAGON_PROFILE");
+    }
+
+    int downloadConcurrency() {
+        long configured = bytes(
+                setting(downloadConcurrency, "s3wagon.downloadConcurrency", "S3WAGON_DOWNLOAD_CONCURRENCY"),
+                DEFAULT_DOWNLOAD_CONCURRENCY);
+        return (int) Math.max(1, Math.min(configured, MAX_MULTIPART_CONCURRENCY));
+    }
+
+    long downloadChunkSize() {
+        return Math.max(MINIMUM_DOWNLOAD_CHUNK_SIZE, bytes(
+                setting(downloadChunkSize, "s3wagon.downloadChunkSize", "S3WAGON_DOWNLOAD_CHUNK_SIZE"),
+                DEFAULT_DOWNLOAD_CHUNK_SIZE));
+    }
+
+    long downloadThreshold() {
+        return bytes(setting(downloadThreshold, "s3wagon.downloadThreshold", "S3WAGON_DOWNLOAD_THRESHOLD"),
+                DEFAULT_DOWNLOAD_THRESHOLD);
+    }
+
+    int multipartConcurrency() {
+        long configured = bytes(
+                setting(multipartConcurrency, "s3wagon.multipartConcurrency", "S3WAGON_MULTIPART_CONCURRENCY"),
+                DEFAULT_MULTIPART_CONCURRENCY);
+        return (int) Math.max(1, Math.min(configured, MAX_MULTIPART_CONCURRENCY));
+    }
+
+    /** Attempts after the first; the SDK's own default is used when this is unset. */
+    Integer retries() {
+        String configured = setting(retries, "s3wagon.retries", "S3WAGON_RETRIES");
+        return configured == null ? null : (int) Math.max(0, Long.parseLong(configured.trim()));
+    }
+
+    String storageClass() {
+        return setting(storageClass, "s3wagon.storageClass", "S3WAGON_STORAGE_CLASS");
+    }
+
+    String objectTags() {
+        return setting(objectTags, "s3wagon.objectTags", "S3WAGON_OBJECT_TAGS");
+    }
+
+    long multipartThreshold() {
+        return bytes(setting(multipartThreshold, "s3wagon.multipartThreshold", "S3WAGON_MULTIPART_THRESHOLD"),
+                DEFAULT_MULTIPART_THRESHOLD);
+    }
+
+    long multipartPartSize() {
+        return Math.max(MINIMUM_PART_SIZE,
+                bytes(setting(multipartPartSize, "s3wagon.multipartPartSize", "S3WAGON_MULTIPART_PART_SIZE"),
+                        DEFAULT_MULTIPART_PART_SIZE));
+    }
+
+    private static long bytes(String value, long fallback) {
+        return value == null ? fallback : Long.parseLong(value.trim());
+    }
+
+    /** Parsed up front so a malformed size fails on connect rather than on the first big deploy. */
+    private void validateSizes() throws ConnectionException {
+        try {
+            multipartThreshold();
+            multipartPartSize();
+            multipartConcurrency();
+            retries();
+            downloadConcurrency();
+            downloadChunkSize();
+            downloadThreshold();
+        } catch (NumberFormatException e) {
+            throw new ConnectionException("multipartThreshold, multipartPartSize, multipartConcurrency and retries must all be numbers", e);
+        }
+    }
+
+    /**
+     * Since 2.30 the SDK adds a CRC32 trailer to uploads by default, which some S3-compatible
+     * stores reject. {@code when_required} restores the wire format older versions used.
+     */
+    private static RequestChecksumCalculation checksumCalculation(String value) throws ConnectionException {
+        if (value == null) {
+            return null;
+        }
+        try {
+            return RequestChecksumCalculation.fromValue(value);
+        } catch (IllegalArgumentException e) {
+            throw new ConnectionException("unknown requestChecksumCalculation \"" + value
+                    + "\"; expected when_supported or when_required", e);
+        }
+    }
+
+    Boolean pathStyleAccess() {
+        if (pathStyleAccess != null) {
+            return pathStyleAccess;
+        }
+        String configured = setting(null, "s3wagon.pathStyleAccess", "S3WAGON_PATH_STYLE_ACCESS");
+        return configured == null ? null : Boolean.valueOf(configured);
+    }
+
+    /**
+     * Explicit configuration wins, then a system property, then an environment variable.
+     */
+    private String setting(String explicit, String property, String variable) {
+        if (isNotBlank(explicit)) {
+            return explicit;
+        }
+        String fromProperty = System.getProperty(property);
+        if (isNotBlank(fromProperty)) {
+            return fromProperty;
+        }
+        String fromEnvironment = environment.apply(variable);
+        return isNotBlank(fromEnvironment) ? fromEnvironment : null;
+    }
+
+    private static ServerSideEncryption encryption(String value) throws ConnectionException {
+        if (value == null) {
+            return null;
+        }
+        ServerSideEncryption encryption = ServerSideEncryption.fromValue(value);
+        if (encryption == ServerSideEncryption.UNKNOWN_TO_SDK_VERSION) {
+            throw new ConnectionException("unknown serverSideEncryption \"" + value + "\"; expected one of "
+                    + ServerSideEncryption.knownValues());
+        }
+        return encryption;
+    }
+
+    private static ObjectCannedACL cannedAcl(String value) throws ConnectionException {
+        if (value == null) {
+            return null;
+        }
+        ObjectCannedACL acl = ObjectCannedACL.fromValue(value);
+        if (acl == ObjectCannedACL.UNKNOWN_TO_SDK_VERSION) {
+            throw new ConnectionException("unknown cannedAcl \"" + value + "\"; expected one of "
+                    + ObjectCannedACL.knownValues());
+        }
+        return acl;
+    }
+
+    /**
+     * Turns a repository base directory into an S3 key prefix.
+     *
+     * <p>Repository URLs reach us exactly as the user wrote them, so the base directory may or may
+     * not have a leading or trailing slash. S3 keys have no leading slash, and the prefix has to
+     * end with one so that it does not run into the resource name.
+     */
+    static String baseDirectory(String basedir) {
+        if (basedir == null) {
+            return "";
+        }
+        // Trimming and slash-stripping have to run to a fixed point: "/ foo" strips to " foo",
+        // whose leading space only a second trim removes. One pass left the result depending on
+        // how many times the value had been normalised.
+        String prefix = basedir;
+        String previous;
+        do {
+            previous = prefix;
+            prefix = prefix.trim();
+            while (prefix.startsWith("/")) {
+                prefix = prefix.substring(1);
+            }
+            while (prefix.endsWith("/")) {
+                prefix = prefix.substring(0, prefix.length() - 1);
+            }
+        } while (!prefix.equals(previous));
+        return prefix.isEmpty() ? "" : prefix + "/";
     }
 
     @Override
@@ -58,44 +493,615 @@ public final class S3Wagon extends AbstractWagon {
     public void get(String resourceName, File destination) throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
         Resource resource = new Resource(resourceName);
         this.fireGetInitiated(resource, destination);
+        download(resourceName, resource, destination, null);
+    }
+
+    /**
+     * Downloads straight into a stream, which is what the resolver asks for when it wants the bytes
+     * in memory rather than on disk - checksums, mostly. Without this it falls back to the
+     * file-based path and writes a temporary file for every one of them.
+     */
+    @Override
+    public void getToStream(String resourceName, OutputStream stream)
+            throws ResourceDoesNotExistException, TransferFailedException, AuthorizationException {
+        Resource resource = new Resource(resourceName);
+        this.fireGetInitiated(resource, null);
+        download(resourceName, resource, null, stream);
+    }
+
+    @Override
+    public boolean getIfNewerToStream(String resourceName, OutputStream stream, long timestamp)
+            throws ResourceDoesNotExistException, TransferFailedException, AuthorizationException {
+        if (timestamp == 0 || isNewer(resourceName, timestamp)) {
+            getToStream(resourceName, stream);
+            return true;
+        }
+        return false;
+    }
+
+    /** Exactly one of {@code destination} and {@code stream} is non-null. */
+    private void download(String resourceName, Resource resource, File destination, OutputStream stream)
+            throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
+        fireTransferDebug("fetching s3://" + bucket + "/" + key(resourceName));
+        int concurrency = downloadConcurrency();
+        if (destination != null && concurrency > 1) {
+            // A stream has to be written in order, so only the file path can be split up.
+            long length = lengthForRangedDownload(resourceName);
+            if (length > downloadThreshold()) {
+                downloadInRanges(resourceName, resource, destination, length, concurrency);
+                return;
+            }
+        }
         try {
             GetObjectRequest objectRequest = GetObjectRequest
                     .builder()
                     .key(key(resourceName))
                     .bucket(bucket)
                     .build();
-            this.fireGetStarted(resource, destination);
             try (ResponseInputStream<GetObjectResponse> is = s3.getObject(objectRequest)) {
-                this.getTransfer(resource, destination, is);
+                describe(resource, is.response());
+                // getTransfer fires started/progress/completed itself.
+                if (destination != null) {
+                    this.getTransfer(resource, destination, is);
+                } else {
+                    this.getTransfer(resource, stream, is);
+                }
             }
-            this.fireGetCompleted(resource, destination);
-        } catch (NoSuchKeyException | NoSuchBucketException e) {
-            throw new ResourceDoesNotExistException(resourceName + " not found in S3", e);
-        } catch (S3Exception e) {
-            if (isNotFound(e)) {
+        } catch (SdkException e) {
+            this.fireTransferError(resource, e, TransferEvent.REQUEST_GET);
+            if (isMissing(e)) {
                 throw new ResourceDoesNotExistException(resourceName + " not found in S3", e);
             }
-            throw new TransferFailedException("Transfer from S3 failed", e);
-        } catch (ExpiredTokenException e) {
-            throw new AuthorizationException("S3 authorization error", e);
+            if (isAuthorizationFailure(e)) {
+                throw new AuthorizationException("Not authorized to read " + resourceName + " from S3", e);
+            }
+            throw new TransferFailedException("Transfer of " + resourceName + " from S3 failed", e);
         } catch (IOException e) {
-            throw new TransferFailedException("Transfer from S3 failed", e);
+            // Only close() declares IOException here, and getTransfer closes the stream first, so
+            // in practice a broken stream is reported there. This keeps the contract honest anyway.
+            this.fireTransferError(resource, e, TransferEvent.REQUEST_GET);
+            throw new TransferFailedException("Transfer of " + resourceName + " from S3 failed", e);
         }
     }
 
     @Override
-    public void put(File source, String destination) {
-        PutObjectRequest putOb = PutObjectRequest.builder()
+    public void put(File source, String destination) throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
+        Resource resource = new Resource(destination);
+        resource.setContentLength(source.length());
+        resource.setLastModified(source.lastModified());
+        this.firePutInitiated(resource, source);
+        if (!source.exists()) {
+            ResourceDoesNotExistException e = new ResourceDoesNotExistException(source + " does not exist locally");
+            this.fireTransferError(resource, e, TransferEvent.REQUEST_PUT);
+            throw e;
+        }
+        try {
+            this.firePutStarted(resource, source);
+            fireTransferDebug("s3-wagon: uploading " + source.length() + " bytes to s3://" + bucket
+                    + "/" + key(destination));
+            if (source.length() > multipartThreshold()) {
+                uploadInParts(source, destination, resource);
+            } else {
+                s3.putObject(putObjectRequest(source, destination), progressReporting(source, resource));
+            }
+            this.firePutCompleted(resource, source);
+        } catch (SdkException e) {
+            this.fireTransferError(resource, e, TransferEvent.REQUEST_PUT);
+            if (isMissing(e)) {
+                throw new ResourceDoesNotExistException("bucket " + bucket + " not found in S3", e);
+            }
+            if (isAuthorizationFailure(e)) {
+                throw new AuthorizationException("Not authorized to write " + destination + " to S3", e);
+            }
+            throw new TransferFailedException("Transfer of " + destination + " to S3 failed", e);
+        }
+    }
+
+    /**
+     * Streams the file to S3 while reporting progress to the transfer listeners.
+     *
+     * <p>The SDK opens a fresh stream for every attempt, which is what makes retries safe.
+     */
+    private RequestBody progressReporting(File source, Resource resource) {
+        return RequestBody.fromContentProvider(
+                () -> new ProgressReportingInputStream(openForReading(source), resource),
+                source.length(),
+                // Ask the SDK what it would have derived from the file name, so wrapping the stream
+                // does not downgrade every artifact to application/octet-stream.
+                RequestBody.fromFile(source.toPath()).contentType());
+    }
+
+    private static InputStream openForReading(File source) {
+        try {
+            return new BufferedInputStream(new FileInputStream(source));
+        } catch (IOException e) {
+            throw SdkClientException.create("Could not read " + source, e);
+        }
+    }
+
+    /**
+     * Reports every byte the SDK reads to the wagon's transfer listeners, so that uploads show
+     * progress the same way downloads do.
+     */
+    private final class ProgressReportingInputStream extends FilterInputStream {
+
+        private final Resource resource;
+
+        private ProgressReportingInputStream(InputStream in, Resource resource) {
+            super(in);
+            this.resource = resource;
+        }
+
+        @Override
+        public int read() throws IOException {
+            int read = super.read();
+            if (read != -1) {
+                report(new byte[]{(byte) read}, 1);
+            }
+            return read;
+        }
+
+        @Override
+        public int read(byte[] buffer, int offset, int length) throws IOException {
+            int read = super.read(buffer, offset, length);
+            if (read > 0) {
+                report(offset == 0 ? buffer : Arrays.copyOfRange(buffer, offset, offset + read), read);
+            }
+            return read;
+        }
+
+        private void report(byte[] buffer, int read) {
+            // Parts may be uploaded concurrently; transfer listeners are not documented as thread
+            // safe, so they only ever see one event at a time.
+            reportProgress(resource, TransferEvent.REQUEST_PUT, buffer, read);
+        }
+    }
+
+    /**
+     * The object size, or -1 when it cannot be established cheaply. A HEAD costs a round trip, so
+     * it is only worth it when the result might let the download be split up.
+     */
+    private long lengthForRangedDownload(String resourceName)
+            throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
+        try {
+            Long length = headObject(resourceName).contentLength();
+            return length == null ? -1 : length;
+        } catch (SdkException e) {
+            if (isMissing(e)) {
+                throw new ResourceDoesNotExistException(resourceName + " not found in S3", e);
+            }
+            if (isAuthorizationFailure(e)) {
+                throw new AuthorizationException("Not authorized to read " + resourceName + " from S3", e);
+            }
+            throw new TransferFailedException("Lookup of " + resourceName + " in S3 failed", e);
+        }
+    }
+
+    /**
+     * Downloads an object as several ranged GETs written straight into the destination file.
+     *
+     * <p>Positional channel writes are safe from several threads, so the chunks can land in any
+     * order. Progress events are serialised, but they are necessarily reported out of order - see
+     * {@link #setDownloadConcurrency(String)}.
+     */
+    private void downloadInRanges(String resourceName, Resource resource, File destination, long length,
+            int concurrency) throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
+        long chunkSize = downloadChunkSize();
+        int chunks = (int) ((length + chunkSize - 1) / chunkSize);
+        fireTransferDebug("s3-wagon: ranged download of " + length + " bytes in " + chunks
+                + " chunks with concurrency " + concurrency);
+        resource.setContentLength(length);
+        createParentDirectories(destination);
+        fireGetStarted(resource, destination);
+
+        ExecutorService pool = Executors.newFixedThreadPool(Math.min(concurrency, chunks), runnable -> {
+            Thread thread = new Thread(runnable, "s3-wagon-download");
+            thread.setDaemon(true);
+            return thread;
+        });
+        try (RandomAccessFile file = new RandomAccessFile(destination, "rw")) {
+            file.setLength(length);
+            FileChannel channel = file.getChannel();
+            List<Future<?>> futures = new ArrayList<>();
+            for (int chunk = 0; chunk < chunks; chunk++) {
+                long start = chunk * chunkSize;
+                long end = Math.min(start + chunkSize, length) - 1;
+                futures.add(pool.submit(() -> {
+                    fetchRange(resourceName, resource, channel, start, end);
+                    return null;
+                }));
+            }
+            for (Future<?> future : futures) {
+                awaitChunk(future);
+            }
+        } catch (IOException e) {
+            failRangedDownload(resource, destination, e);
+            throw new TransferFailedException("Transfer of " + resourceName + " from S3 failed", e);
+        } catch (SdkException e) {
+            failRangedDownload(resource, destination, e);
+            if (isMissing(e)) {
+                throw new ResourceDoesNotExistException(resourceName + " not found in S3", e);
+            }
+            if (isAuthorizationFailure(e)) {
+                throw new AuthorizationException("Not authorized to read " + resourceName + " from S3", e);
+            }
+            throw new TransferFailedException("Transfer of " + resourceName + " from S3 failed", e);
+        } finally {
+            pool.shutdownNow();
+        }
+        fireGetCompleted(resource, destination);
+    }
+
+    private void fetchRange(String resourceName, Resource resource, FileChannel channel, long start, long end) {
+        GetObjectRequest request = GetObjectRequest.builder()
+                .bucket(bucket)
+                .key(key(resourceName))
+                .range("bytes=" + start + "-" + end)
+                .build();
+        try (ResponseInputStream<GetObjectResponse> body = s3.getObject(request)) {
+            byte[] buffer = new byte[64 * 1024];
+            long position = start;
+            int read;
+            while ((read = body.read(buffer)) != -1) {
+                channel.write(ByteBuffer.wrap(buffer, 0, read), position);
+                position += read;
+                reportProgress(resource, TransferEvent.REQUEST_GET, buffer, read);
+            }
+        } catch (IOException e) {
+            throw SdkClientException.create("Could not write " + resourceName, e);
+        }
+    }
+
+    private void failRangedDownload(Resource resource, File destination, Exception e) {
+        if (destination.exists() && !destination.delete()) {
+            destination.deleteOnExit();
+        }
+        fireTransferError(resource, e, TransferEvent.REQUEST_GET);
+    }
+
+    private static void awaitChunk(Future<?> future) {
+        try {
+            future.get();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw SdkClientException.create("interrupted while downloading a range", e);
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof RuntimeException) {
+                throw (RuntimeException) cause;
+            }
+            throw SdkClientException.create("a range failed to download", cause);
+        }
+    }
+
+    /**
+     * Copies the object metadata onto the resource, so that transfer listeners can report the size
+     * of a download and callers can see how old it is. Without this the listeners are handed an
+     * unknown content length and progress output is degraded.
+     */
+    private static void describe(Resource resource, GetObjectResponse response) {
+        if (response.contentLength() != null) {
+            resource.setContentLength(response.contentLength());
+        }
+        if (response.lastModified() != null) {
+            resource.setLastModified(response.lastModified().toEpochMilli());
+        }
+    }
+
+    /**
+     * Uploads a large artifact as a multipart upload.
+     *
+     * <p>A single PutObject is capped at 5GB by S3, so anything bigger cannot be uploaded any other
+     * way. Parts are sent sequentially: a Wagon's transfer listeners are not documented as thread
+     * safe, so uploading parts in parallel would need its own progress accounting.
+     *
+     * <p>A failed upload is aborted so the bucket is not left paying for orphaned parts.
+     */
+    private void uploadInParts(File source, String destination, Resource resource) {
+        long length = source.length();
+        long partSize = partSizeFor(length);
+        int concurrency = multipartConcurrency();
+        String uploadId = s3.createMultipartUpload(createMultipartUploadRequest(source, destination)).uploadId();
+        fireTransferDebug("s3-wagon: multipart upload " + uploadId + " of " + length
+                + " bytes in parts of " + partSize + " with concurrency " + concurrency);
+        try {
+            int partCount = (int) ((length + partSize - 1) / partSize);
+            List<CompletedPart> parts = concurrency > 1
+                    ? uploadPartsInParallel(source, destination, resource, uploadId, partSize, partCount, concurrency)
+                    : uploadPartsSequentially(source, destination, resource, uploadId, partSize, partCount);
+            s3.completeMultipartUpload(CompleteMultipartUploadRequest.builder()
+                    .bucket(bucket)
+                    .key(key(destination))
+                    .uploadId(uploadId)
+                    .multipartUpload(CompletedMultipartUpload.builder().parts(parts).build())
+                    .build());
+        } catch (RuntimeException e) {
+            abortQuietly(destination, uploadId, e);
+            throw e;
+        }
+    }
+
+    private List<CompletedPart> uploadPartsSequentially(File source, String destination, Resource resource,
+            String uploadId, long partSize, int partCount) {
+        List<CompletedPart> parts = new ArrayList<>();
+        for (int partNumber = 1; partNumber <= partCount; partNumber++) {
+            parts.add(uploadSinglePart(source, destination, resource, uploadId, partSize, partNumber, source.length()));
+        }
+        return parts;
+    }
+
+    /**
+     * Uploads parts on a small pool.
+     *
+     * <p>Parts are independent, so the only shared state is the transfer listeners - and a Wagon's
+     * listeners are not documented as thread safe. {@link ProgressReportingInputStream} therefore
+     * serialises its events, which keeps listeners seeing one transfer at a time even though the
+     * bytes are going out on several connections.
+     */
+    private List<CompletedPart> uploadPartsInParallel(File source, String destination, Resource resource,
+            String uploadId, long partSize, int partCount, int concurrency) {
+        ExecutorService pool = Executors.newFixedThreadPool(Math.min(concurrency, partCount), runnable -> {
+            Thread thread = new Thread(runnable, "s3-wagon-upload");
+            thread.setDaemon(true);
+            return thread;
+        });
+        try {
+            List<Future<CompletedPart>> futures = new ArrayList<>();
+            for (int partNumber = 1; partNumber <= partCount; partNumber++) {
+                int part = partNumber;
+                futures.add(pool.submit(() ->
+                        uploadSinglePart(source, destination, resource, uploadId, partSize, part, source.length())));
+            }
+            List<CompletedPart> parts = new ArrayList<>();
+            for (Future<CompletedPart> future : futures) {
+                parts.add(awaitPart(future));
+            }
+            return parts;
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    private static CompletedPart awaitPart(Future<CompletedPart> future) {
+        try {
+            return future.get();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw SdkClientException.create("interrupted while uploading a part", e);
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof RuntimeException) {
+                throw (RuntimeException) cause;
+            }
+            throw SdkClientException.create("a part failed to upload", cause);
+        }
+    }
+
+    private CompletedPart uploadSinglePart(File source, String destination, Resource resource, String uploadId,
+            long partSize, int partNumber, long length) {
+        long offset = (partNumber - 1) * partSize;
+        long thisPart = Math.min(partSize, length - offset);
+        UploadPartRequest request = UploadPartRequest.builder()
                 .bucket(bucket)
                 .key(key(destination))
+                .uploadId(uploadId)
+                .partNumber(partNumber)
+                .contentLength(thisPart)
                 .build();
+        String eTag = s3.uploadPart(request, partBody(source, offset, thisPart, resource)).eTag();
+        return CompletedPart.builder().partNumber(partNumber).eTag(eTag).build();
+    }
 
-        s3.putObject(putOb, RequestBody.fromBytes(getObjectFile(source)));
+    private void abortQuietly(String destination, String uploadId, RuntimeException failure) {
+        try {
+            s3.abortMultipartUpload(AbortMultipartUploadRequest.builder()
+                    .bucket(bucket)
+                    .key(key(destination))
+                    .uploadId(uploadId)
+                    .build());
+        } catch (RuntimeException e) {
+            // The upload already failed; losing the abort as well must not hide the real cause.
+            failure.addSuppressed(e);
+        }
+    }
+
+    /**
+     * S3 allows at most 10000 parts, so the configured size is raised when a file would need more.
+     */
+    long partSizeFor(long length) {
+        long partSize = multipartPartSize();
+        long minimum = (length + MAX_PARTS - 1) / MAX_PARTS;
+        return Math.max(partSize, minimum);
+    }
+
+    private RequestBody partBody(File source, long offset, long length, Resource resource) {
+        return RequestBody.fromContentProvider(
+                () -> new ProgressReportingInputStream(openPart(source, offset, length), resource),
+                length,
+                "application/octet-stream");
+    }
+
+    private static InputStream openPart(File source, long offset, long length) {
+        try {
+            RandomAccessFile file = new RandomAccessFile(source, "r");
+            file.seek(offset);
+            return new BoundedInputStream(new BufferedInputStream(Channels.newInputStream(file.getChannel())), length);
+        } catch (IOException e) {
+            throw SdkClientException.create("Could not read " + source, e);
+        }
+    }
+
+    private CreateMultipartUploadRequest createMultipartUploadRequest(File source, String destination) {
+        CreateMultipartUploadRequest.Builder request = CreateMultipartUploadRequest.builder()
+                .bucket(bucket)
+                .key(key(destination))
+                .contentType(RequestBody.fromFile(source.toPath()).contentType());
+        if (encryption != null) {
+            request.serverSideEncryption(encryption);
+        }
+        String kmsKeyId = sseKmsKeyId();
+        if (kmsKeyId != null) {
+            request.ssekmsKeyId(kmsKeyId);
+        }
+        if (acl != null) {
+            request.acl(acl);
+        }
+        String storageClass = storageClass();
+        if (storageClass != null) {
+            request.storageClass(storageClass);
+        }
+        String tags = objectTags();
+        if (tags != null) {
+            request.tagging(tags);
+        }
+        return request.build();
+    }
+
+    /** Reads at most a fixed number of bytes, so one part cannot run into the next. */
+    private static final class BoundedInputStream extends FilterInputStream {
+
+        private long remaining;
+
+        private BoundedInputStream(InputStream in, long limit) {
+            super(in);
+            this.remaining = limit;
+        }
+
+        @Override
+        public int read() throws IOException {
+            if (remaining <= 0) {
+                return -1;
+            }
+            int read = super.read();
+            if (read != -1) {
+                remaining--;
+            }
+            return read;
+        }
+
+        @Override
+        public int read(byte[] buffer, int offset, int length) throws IOException {
+            if (remaining <= 0) {
+                return -1;
+            }
+            int read = super.read(buffer, offset, (int) Math.min(length, remaining));
+            if (read > 0) {
+                remaining -= read;
+            }
+            return read;
+        }
+
+        @Override
+        public int available() throws IOException {
+            return (int) Math.min(super.available(), remaining);
+        }
+    }
+
+    /**
+     * Uploads straight from a stream, the counterpart of {@link #getToStream}. The resolver uses it
+     * for content it holds in memory rather than in a file - checksums during a deploy.
+     *
+     * <p>A stream cannot be re-read, so an upload big enough to need multiple parts is spooled to a
+     * temporary file first and handed to the ordinary multipart path. Everything below the
+     * threshold - which is all the resolver ever sends this way - goes straight out.
+     */
+    @Override
+    public void putFromStream(InputStream stream, String destination)
+            throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
+        putFromStream(stream, destination, -1, -1);
+    }
+
+    @Override
+    public void putFromStream(InputStream stream, String destination, long contentLength, long lastModified)
+            throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
+        Resource resource = new Resource(destination);
+        resource.setContentLength(contentLength);
+        resource.setLastModified(lastModified);
+        this.firePutInitiated(resource, null);
+
+        if (contentLength < 0 || contentLength > multipartThreshold()) {
+            spoolAndPut(stream, destination, resource);
+            return;
+        }
+        try {
+            this.firePutStarted(resource, null);
+            fireTransferDebug("uploading " + contentLength + " bytes to s3://" + bucket + "/" + key(destination));
+            s3.putObject(putObjectRequest(destination, contentLength),
+                    RequestBody.fromContentProvider(
+                            () -> new ProgressReportingInputStream(stream, resource),
+                            contentLength,
+                            "application/octet-stream"));
+            this.firePutCompleted(resource, null);
+        } catch (SdkException e) {
+            this.fireTransferError(resource, e, TransferEvent.REQUEST_PUT);
+            throw uploadFailure(destination, e);
+        }
+    }
+
+    /** Streams cannot be re-read, so anything needing multipart goes through a temporary file. */
+    private void spoolAndPut(InputStream stream, String destination, Resource resource)
+            throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
+        File spooled = null;
+        try {
+            spooled = File.createTempFile("s3-wagon-upload", ".tmp");
+            Files.copy(stream, spooled.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            put(spooled, destination);
+        } catch (IOException e) {
+            this.fireTransferError(resource, e, TransferEvent.REQUEST_PUT);
+            throw new TransferFailedException("Could not buffer " + destination + " for upload", e);
+        } finally {
+            if (spooled != null && !spooled.delete()) {
+                spooled.deleteOnExit();
+            }
+        }
+    }
+
+    private TransferFailedException uploadFailure(String destination, SdkException e)
+            throws ResourceDoesNotExistException, AuthorizationException {
+        if (isMissing(e)) {
+            throw new ResourceDoesNotExistException("bucket " + bucket + " not found in S3", e);
+        }
+        if (isAuthorizationFailure(e)) {
+            throw new AuthorizationException("Not authorized to write " + destination + " to S3", e);
+        }
+        return new TransferFailedException("Transfer of " + destination + " to S3 failed", e);
+    }
+
+    private PutObjectRequest putObjectRequest(File source, String destination) {
+        return putObjectRequest(destination, source.length());
+    }
+
+    private PutObjectRequest putObjectRequest(String destination, long contentLength) {
+        PutObjectRequest.Builder request = PutObjectRequest.builder()
+                .bucket(bucket)
+                .key(key(destination))
+                .contentLength(contentLength);
+        if (encryption != null) {
+            request.serverSideEncryption(encryption);
+        }
+        String kmsKeyId = sseKmsKeyId();
+        if (kmsKeyId != null) {
+            request.ssekmsKeyId(kmsKeyId);
+        }
+        if (acl != null) {
+            request.acl(acl);
+        }
+        String storageClass = storageClass();
+        if (storageClass != null) {
+            request.storageClass(storageClass);
+        }
+        String tags = objectTags();
+        if (tags != null) {
+            request.tagging(tags);
+        }
+        return request.build();
     }
 
     @Override
     public void closeConnection() {
-        this.s3.close();
+        if (this.s3 != null) {
+            this.s3.close();
+        }
         this.s3 = null;
         this.bucket = null;
         this.baseDirectory = null;
@@ -104,20 +1110,48 @@ public final class S3Wagon extends AbstractWagon {
     private boolean isNewer(String resourceName, long timestamp) throws ResourceDoesNotExistException, AuthorizationException, TransferFailedException {
         try {
             HeadObjectResponse headObject = headObject(resourceName);
-            return headObject.lastModified().getEpochSecond() > timestamp;
-        } catch (NoSuchKeyException | NoSuchBucketException e) {
-            throw new ResourceDoesNotExistException(resourceName + " not found in S3", e);
-        } catch (S3Exception e) {
-            if (isNotFound(e)) {
+            return headObject.lastModified().toEpochMilli() > timestamp;
+        } catch (SdkException e) {
+            if (isMissing(e)) {
                 throw new ResourceDoesNotExistException(resourceName + " not found in S3", e);
             }
-            throw new TransferFailedException("Transfer from S3 failed", e);
-        } catch (ExpiredTokenException e) {
-            throw new AuthorizationException("S3 authorization error", e);
-        } catch (AwsServiceException e) {
-            throw new TransferFailedException("Transfer from S3 failed", e);
+            if (isAuthorizationFailure(e)) {
+                throw new AuthorizationException("Not authorized to read " + resourceName + " from S3", e);
+            }
+            throw new TransferFailedException("Lookup of " + resourceName + " in S3 failed", e);
         }
+    }
 
+    /**
+     * Whether the failure means "this object or bucket is not there".
+     *
+     * <p>A HEAD response carries no body for the SDK to parse an error code out of, so a missing
+     * object can surface as a plain 404 rather than as {@link NoSuchKeyException}.
+     */
+    private static boolean isMissing(SdkException e) {
+        return e instanceof NoSuchKeyException
+                || e instanceof NoSuchBucketException
+                || isNotFound(e);
+    }
+
+    /**
+     * Whether the failure is a bare HTTP 404, with no error code in the body to identify it by.
+     *
+     * <p>Package-private so it can be asserted on directly; {@link #isMissing} is the predicate the
+     * transfer paths actually use.
+     */
+    static boolean isNotFound(SdkException e) {
+        return statusCode(e) == 404;
+    }
+
+    private static boolean isAuthorizationFailure(SdkException e) {
+        return e instanceof ExpiredTokenException
+                || statusCode(e) == 401
+                || statusCode(e) == 403;
+    }
+
+    private static int statusCode(SdkException e) {
+        return e instanceof AwsServiceException ? ((AwsServiceException) e).statusCode() : -1;
     }
 
     private HeadObjectResponse headObject(String resourceName) {
@@ -129,19 +1163,74 @@ public final class S3Wagon extends AbstractWagon {
     }
 
     private String key(String resourceName) {
-        return this.baseDirectory + resourceName;
+        String resource = resourceName;
+        while (resource.startsWith("/")) {
+            resource = resource.substring(1);
+        }
+        return this.baseDirectory + resource;
     }
 
-    static boolean isNotFound(S3Exception exception) {
-        return exception.statusCode() == 404;
-    }
-
-    private static S3Client s3(AuthenticationInfo authenticationInfo, SdkHttpClient httpClient) {
+    private S3Client s3(AuthenticationInfo authenticationInfo, SdkHttpClient httpClient) throws ConnectionException {
         S3ClientBuilder s3 = S3Client.builder().httpClient(httpClient);
-        if (hasMinimumRequiredFields(authenticationInfo)) {
-            s3.credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(authenticationInfo.getUserName(), authenticationInfo.getPassword())));
+        AwsCredentialsProvider credentials = credentialsProvider(authenticationInfo);
+        if (credentials != null) {
+            s3.credentialsProvider(credentials);
+        }
+        String region = region();
+        if (region != null) {
+            s3.region(Region.of(region));
+        }
+        String endpoint = endpoint();
+        if (endpoint != null) {
+            s3.endpointOverride(endpoint(endpoint));
+        }
+        Boolean pathStyleAccess = pathStyleAccess();
+        if (pathStyleAccess != null) {
+            s3.forcePathStyle(pathStyleAccess);
+        }
+        if (checksumCalculation != null) {
+            s3.requestChecksumCalculation(checksumCalculation);
+        }
+        Integer retries = retries();
+        if (retries != null) {
+            s3.overrideConfiguration(o -> o.retryStrategy(
+                    AwsRetryStrategy.standardRetryStrategy().toBuilder().maxAttempts(retries + 1).build()));
         }
         return s3.build();
+    }
+
+    private static URI endpoint(String endpoint) throws ConnectionException {
+        URI uri = URI.create(endpoint);
+        if (uri.getScheme() == null || uri.getHost() == null) {
+            throw new ConnectionException("endpoint must be an absolute URL such as https://minio.example.com,"
+                    + " but was \"" + endpoint + "\"");
+        }
+        return uri;
+    }
+
+    /**
+     * Credentials from settings.xml win, then a named profile, then the SDK's default chain.
+     *
+     * <p>Returning null leaves the builder alone so the default chain applies - which is what makes
+     * {@code aws sso login} work without exporting anything.
+     */
+    AwsCredentialsProvider credentialsProvider(AuthenticationInfo authenticationInfo) {
+        if (hasMinimumRequiredFields(authenticationInfo)) {
+            String token = sessionToken();
+            AwsCredentials credentials = token != null
+                    ? AwsSessionCredentials.create(
+                            authenticationInfo.getUserName(), authenticationInfo.getPassword(), token)
+                    : AwsBasicCredentials.create(
+                            authenticationInfo.getUserName(), authenticationInfo.getPassword());
+            return StaticCredentialsProvider.create(credentials);
+        }
+        String profile = profile();
+        if (profile != null) {
+            // Role assumption configured in ~/.aws/config resolves through this too, which is why
+            // the STS module is on the classpath.
+            return ProfileCredentialsProvider.create(profile);
+        }
+        return null;
     }
 
     private static boolean hasMinimumRequiredFields(AuthenticationInfo authenticationInfo) {
@@ -150,11 +1239,20 @@ public final class S3Wagon extends AbstractWagon {
                 && isNotBlank(authenticationInfo.getPassword());
     }
 
-    private static SdkHttpClient awsHttpClient(ProxyInfo proxyInfo) {
+    private SdkHttpClient awsHttpClient(ProxyInfo proxyInfo) throws ConnectionException {
         ApacheHttpClient.Builder httpClientBuilder = ApacheHttpClient.builder();
-        if (proxyInfo != null) {
+        // Maven configures these through the Wagon interface; before this they were accepted and
+        // then dropped, leaving every build on the SDK defaults.
+        if (getTimeout() > 0) {
+            httpClientBuilder.connectionTimeout(Duration.ofMillis(getTimeout()));
+        }
+        if (getReadTimeout() > 0) {
+            httpClientBuilder.socketTimeout(Duration.ofMillis(getReadTimeout()));
+        }
+        if (proxyInfo != null && isNotBlank(proxyInfo.getHost())) {
             httpClientBuilder.proxyConfiguration(ProxyConfiguration.builder()
-                    .endpoint(URI.create(proxyInfo.getHost() + ":" + proxyInfo.getPort()))
+                    .endpoint(proxyEndpoint(proxyInfo))
+                    .nonProxyHosts(nonProxyHosts(proxyInfo))
                     .ntlmDomain(proxyInfo.getNtlmDomain())
                     .ntlmWorkstation(proxyInfo.getNtlmHost())
                     .username(proxyInfo.getUserName())
@@ -164,26 +1262,166 @@ public final class S3Wagon extends AbstractWagon {
         return httpClientBuilder.build();
     }
 
+    /**
+     * The proxy endpoint needs a scheme: without one, {@link URI} reads "proxy.example.com:8080" as
+     * a scheme of "proxy.example.com" and leaves the host null, and the proxy is quietly ignored.
+     *
+     * <p>Apache's proxy support speaks HTTP, so a SOCKS proxy type cannot be honoured here and is
+     * treated as HTTP rather than producing a URI the SDK will reject.
+     */
+    static URI proxyEndpoint(ProxyInfo proxyInfo) throws ConnectionException {
+        String type = proxyInfo.getType();
+        String scheme = "https".equalsIgnoreCase(type) ? "https" : "http";
+        // Trimmed because a host read from an environment variable often arrives with a newline
+        // attached, which is never meaningful and would otherwise be rejected below.
+        String host = proxyInfo.getHost().trim();
+        try {
+            URI endpoint = new URI(scheme + "://" + host + ":" + proxyInfo.getPort());
+            // A host containing '/' parses as a URI but ends up with no host at all, which is the
+            // same silently-ignored proxy as a missing scheme, reached a different way.
+            if (endpoint.getHost() == null) {
+                throw new ConnectionException("proxy host \"" + host + "\" is not a usable host name");
+            }
+            return endpoint;
+        } catch (URISyntaxException e) {
+            // A space, a pipe or a stray percent is enough. Left unchecked this escaped connect as
+            // an IllegalArgumentException, which says nothing about the proxy being at fault.
+            throw new ConnectionException("proxy host \"" + host + "\" is not a usable host name", e);
+        }
+    }
+
+    /** Wagon separates non-proxy hosts with '|'; the SDK wants them one by one. */
+    static Set<String> nonProxyHosts(ProxyInfo proxyInfo) {
+        String nonProxyHosts = proxyInfo.getNonProxyHosts();
+        if (!isNotBlank(nonProxyHosts)) {
+            return Collections.emptySet();
+        }
+        Set<String> hosts = new LinkedHashSet<>();
+        for (String host : nonProxyHosts.split("[|,]")) {
+            // Trim first, then test. isNotBlank goes by Character.isWhitespace, which does not
+            // consider control characters blank, while trim strips everything up to U+0020 - so
+            // an entry of control characters passed the test and then trimmed away to nothing.
+            String trimmed = host.trim();
+            if (!trimmed.isEmpty()) {
+                hosts.add(trimmed);
+            }
+        }
+        return hosts;
+    }
+
+    /**
+     * Lists the immediate children of a directory, the way the other wagons do: plain names for
+     * objects, and names ending in "/" for the prefixes below it.
+     *
+     * <p>{@link AbstractWagon} would otherwise throw {@link UnsupportedOperationException} - an
+     * unchecked exception escaping the Wagon contract - at anything that browses a repository.
+     */
+    @Override
+    public List<String> getFileList(String destinationDirectory)
+            throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
+        String prefix = directoryPrefix(destinationDirectory);
+        fireTransferDebug("s3-wagon: listing s3://" + bucket + "/" + prefix);
+        try {
+            List<String> names = new ArrayList<>();
+            String continuationToken = null;
+            do {
+                ListObjectsV2Response response = s3.listObjectsV2(ListObjectsV2Request.builder()
+                        .bucket(bucket)
+                        .prefix(prefix)
+                        .delimiter("/")
+                        .continuationToken(continuationToken)
+                        .build());
+                for (CommonPrefix commonPrefix : response.commonPrefixes()) {
+                    names.add(relativeName(prefix, commonPrefix.prefix()));
+                }
+                for (S3Object object : response.contents()) {
+                    // A "directory marker" object is the prefix itself; it is not a child.
+                    if (!object.key().equals(prefix)) {
+                        names.add(relativeName(prefix, object.key()));
+                    }
+                }
+                continuationToken = Boolean.TRUE.equals(response.isTruncated())
+                        ? response.nextContinuationToken()
+                        : null;
+            } while (continuationToken != null);
+
+            if (names.isEmpty()) {
+                throw new ResourceDoesNotExistException(destinationDirectory + " not found in S3");
+            }
+            return names;
+        } catch (SdkException e) {
+            if (isMissing(e)) {
+                throw new ResourceDoesNotExistException(destinationDirectory + " not found in S3", e);
+            }
+            if (isAuthorizationFailure(e)) {
+                throw new AuthorizationException("Not authorized to list " + destinationDirectory + " in S3", e);
+            }
+            throw new TransferFailedException("Listing of " + destinationDirectory + " in S3 failed", e);
+        }
+    }
+
+    /** A listing prefix is a key that must end with "/" so the delimiter can do its job. */
+    private String directoryPrefix(String destinationDirectory) {
+        String prefix = key(destinationDirectory);
+        return prefix.isEmpty() || prefix.endsWith("/") ? prefix : prefix + "/";
+    }
+
+    private static String relativeName(String prefix, String key) {
+        return key.substring(prefix.length());
+    }
+
+    /**
+     * Directory upload is supported, so callers that have a whole tree to publish do not have to
+     * walk it themselves. Files go up one at a time; each one still reports its own transfer events.
+     */
+    @Override
+    public boolean supportsDirectoryCopy() {
+        return true;
+    }
+
+    @Override
+    public void putDirectory(File sourceDirectory, String destinationDirectory)
+            throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
+        if (!sourceDirectory.isDirectory()) {
+            throw new ResourceDoesNotExistException(sourceDirectory + " is not a directory");
+        }
+        String prefix = destinationDirectory == null || destinationDirectory.isEmpty()
+                || ".".equals(destinationDirectory)
+                ? ""
+                : destinationDirectory.endsWith("/") ? destinationDirectory : destinationDirectory + "/";
+        putDirectoryContents(sourceDirectory, prefix);
+    }
+
+    private void putDirectoryContents(File directory, String prefix)
+            throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
+        File[] children = directory.listFiles();
+        if (children == null) {
+            throw new TransferFailedException("Could not list " + directory);
+        }
+        Arrays.sort(children);
+        for (File child : children) {
+            if (child.isDirectory()) {
+                putDirectoryContents(child, prefix + child.getName() + "/");
+            } else {
+                put(child, prefix + child.getName());
+            }
+        }
+    }
+
     @Override
     public boolean resourceExists(String resourceName) throws TransferFailedException, AuthorizationException {
         try {
             headObject(resourceName);
             return true;
-        } catch (S3Exception e) {
-            if (isNotFound(e)) {
+        } catch (SdkException e) {
+            if (isMissing(e)) {
                 return false;
             }
-            throw e;
+            if (isAuthorizationFailure(e)) {
+                throw new AuthorizationException("Not authorized to read " + resourceName + " from S3", e);
+            }
+            throw new TransferFailedException("Lookup of " + resourceName + " in S3 failed", e);
         }
     }
 
-    private static byte[] getObjectFile(File file) {
-        try (FileInputStream fileInputStream = new FileInputStream(file)) {
-            byte[] bytesArray = new byte[(int) file.length()];
-            fileInputStream.read(bytesArray);
-            return bytesArray;
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
-    }
 }

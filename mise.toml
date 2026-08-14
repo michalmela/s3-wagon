@@ -1,0 +1,153 @@
+[tools]
+act = "0.2.87"
+actionlint = "1.7.12"
+"aqua:sharkdp/hyperfine" = "1.20.0"
+# The second JDK is only used by verify:java8, which checks that the artifact
+# really runs on the Java 8 bytecode level it ships.
+java = ["zulu-26.32.13.0", "zulu-8.96.0.19"]
+maven = "3.9.16"
+pinact = "3.9.0"
+scorecard = "5.5.0"
+
+[env]
+# Keep the local repository resolution reproducible across machines and CI.
+MAVEN_ARGS = "--batch-mode --no-transfer-progress"
+
+[tasks.clean]
+description = "Remove build output"
+run = "mvn clean"
+
+[tasks.compile]
+description = "Compile main sources"
+run = "mvn compile"
+sources = ["pom.xml", "src/main/**/*"]
+outputs = { auto = true }
+
+[tasks.test]
+description = "Run the unit test suite"
+run = "mvn test"
+sources = ["pom.xml", "src/main/**/*", "src/test/**/*"]
+outputs = { auto = true }
+
+[tasks.build]
+description = "Build the wagon jar (runs tests)"
+depends = ["test"]
+run = "mvn package"
+sources = ["pom.xml", "src/main/**/*", "src/test/**/*"]
+outputs = ["target/s3-wagon-*.jar"]
+
+[tasks.install]
+description = "Install the wagon into the local Maven repository"
+depends = ["build"]
+run = "mvn install"
+
+[tasks.verify]
+description = "Full verification, as run in CI"
+run = "mvn verify"
+
+[tasks."verify:runtime"]
+description = "Check that the built wagon runs on a given JDK (defaults to Java 8)"
+depends = ["build"]
+usage = '''
+flag "--java <java>" help="mise java version to run the wagon on" default="zulu-8.96.0.19"
+'''
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+mvn -q dependency:build-classpath -Dmdep.outputFile=target/runtime-classpath.txt -Dmdep.includeScope=runtime
+# The build also produces -sources and -javadoc jars; neither carries classes.
+jar=$(ls target/s3-wagon-*.jar | grep -vE -- "-(sources|javadoc)\\.jar$" | head -1)
+cp="$jar:$(cat target/runtime-classpath.txt)"
+mkdir -p target/runtime-check
+# Compiled by the modern JDK at release 8, then run on the JDK under test.
+javac --release 8 -nowarn -cp "$cp" -d target/runtime-check src/verify/java8/Java8SmokeCheck.java
+mise install "java@${usage_java}"
+mise x "java@${usage_java}" -- java -cp "target/runtime-check:$cp" Java8SmokeCheck
+"""
+
+[tasks.deploy]
+description = "Deploy a release to Clojars"
+confirm = "Deploy a release to Clojars?"
+depends = ["verify"]
+run = "mvn deploy"
+
+[tasks."release:preview"]
+description = "Preview the release release-please would propose"
+# Scoped to this task rather than the project toolchain: it needs a Node
+# runtime, which nothing else here does, and it is a convenience rather
+# than part of the build. The action bundles release-please ^17.6.0, so
+# this is representative without being the identical build.
+tools = { node = "24", "npm:release-please" = "17.11.1" }
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+release-please release-pr \
+  --repo-url=michalmela/s3-wagon \
+  --config-file=release-please-config.json \
+  --manifest-file=.release-please-manifest.json \
+  --token="$(gh auth token)" \
+  --target-branch="${MISE_RELEASE_BRANCH:-master}" \
+  --dry-run
+"""
+
+[tasks."ci:dryrun"]
+description = "Check every workflow resolves its actions, without running them"
+# actionlint validates syntax but cannot know whether an action reference points
+# at something executable. A wrong reference is what broke the vulnerability
+# workflow: osv-scanner-action is a monorepo and the root has no runs: section.
+# act's dry run resolves each action and fails on exactly that, in milliseconds.
+# Not part of lint, because the first run clones the actions it references.
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+for workflow in .github/workflows/*.yml; do
+  echo "==> $workflow"
+  act --workflows "$workflow" --dryrun --list >/dev/null
+  act --workflows "$workflow" --dryrun
+done
+"""
+
+[tasks."ci:local"]
+description = "Actually run a CI job locally with act (needs Docker; pass -j <job>)"
+# act cannot reproduce everything GitHub provides - no Pages, no OIDC, no code
+# scanning upload - but it does run steps on Linux, which is where both of this
+# project's CI failures came from.
+run = "act --workflows .github/workflows"
+
+[tasks.scorecard]
+description = "Score this repository's supply-chain practices locally"
+# The binary cannot publish results - that is OIDC work the GitHub Action does,
+# and it is what makes the public badge exist - so this complements the workflow
+# rather than replacing it. Useful for seeing a score before pushing.
+run = "scorecard --repo=github.com/michalmela/s3-wagon --show-details"
+
+[tasks."lint:pinned"]
+description = "Check every GitHub Action is pinned to a commit SHA"
+# --check fails rather than rewriting, which is what CI wants. --verify also
+# confirms each SHA really is the version the comment claims, so a pin cannot
+# quietly drift from its label.
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+# --verify asks the GitHub API whether each SHA really is the tagged version, and
+# unauthenticated requests run out of rate limit quickly. CI supplies GITHUB_TOKEN;
+# locally, borrow the gh CLI's.
+export GITHUB_TOKEN="${GITHUB_TOKEN:-$(gh auth token 2>/dev/null || true)}"
+pinact run --check --verify
+"""
+sources = [".github/workflows/*.yml", ".pinact.yaml"]
+outputs = { auto = true }
+
+[tasks."lint:actions"]
+description = "Lint the GitHub Actions workflows"
+run = "actionlint"
+sources = [".github/workflows/*.yml"]
+outputs = { auto = true }
+
+[tasks.lint]
+description = "Run every linter"
+depends = ["lint:*"]
+
+[tasks.pre-commit]
+description = "Checks that run before every commit"
+depends = ["lint", "test"]

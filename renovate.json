@@ -1,0 +1,58 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":semanticCommits",
+    ":semanticCommitTypeAll(build)"
+  ],
+  "timezone": "Europe/Warsaw",
+  "schedule": [
+    "before 6am on monday"
+  ],
+  "labels": [
+    "dependencies"
+  ],
+  "enabledManagers": [
+    "maven",
+    "github-actions",
+    "mise",
+    "custom.regex"
+  ],
+  "packageRules": [
+    {
+      "description": "The AWS SDK modules are released together and must move together.",
+      "matchPackageNames": [
+        "/^software\\.amazon\\.awssdk:/"
+      ],
+      "groupName": "AWS SDK"
+    },
+    {
+      "description": "Test-only tooling can land in one pull request.",
+      "matchPackageNames": [
+        "org.junit:junit-bom",
+        "org.testcontainers:testcontainers-bom"
+      ],
+      "groupName": "test tooling"
+    }
+  ],
+  "customManagers": [
+    {
+      "description": "Keep the MinIO image used by the integration tests current.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^pom\\.xml$/"
+      ],
+      "matchStrings": [
+        "<minio\\.image>(?<depName>[^:]+):(?<currentValue>[^<]+)</minio\\.image>"
+      ],
+      "datasourceTemplate": "docker"
+    }
+  ],
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "labels": [
+      "security"
+    ]
+  },
+  "osvVulnerabilityAlerts": true
+}

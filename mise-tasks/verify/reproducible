@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+#MISE description="Rebuild a published release and check it matches, byte for byte"
+#USAGE flag "-r --repo <repo>" help="repository holding the reference binaries" default="https://repo.clojars.org"
+set -euo pipefail
+
+repo="${usage_repo:-https://repo.clojars.org/}"
+version="$(mvn -q -DforceStdout help:evaluate -Dexpression=project.version)"
+
+# The comparison is only meaningful against the toolchain the release was built
+# with. Same major JDK is enough - vendor and OS do not affect the output - but a
+# different major does, because javac names synthetic members differently.
+pinned="$(sed -n 's/^java = \[\"\([^\"]*\)\".*/\1/p' mise.toml | head -1)"
+echo "==> project version : $version"
+echo "==> reference repo  : $repo"
+echo "==> pinned JDK      : ${pinned:-unknown} (running $(java -version 2>&1 | head -1))"
+echo
+
+# artifact:compare rebuilds, then downloads the published artifacts and diffs the
+# checksums. Static analysis and coverage do not touch the outputs, so they are
+# skipped here exactly as in .buildspec - anything that could change a byte stays.
+if mvn -B --no-transfer-progress clean verify artifact:compare \
+     -DskipTests -Dspotbugs.skip=true -Djacoco.skip=true \
+     -Dreference.repo="$repo"; then
+  echo
+  echo "reproducible: the rebuild matches $version as published"
+  exit 0
+fi
+
+status=$?
+echo
+echo "The rebuild did NOT match $version as published." >&2
+echo "Before assuming a problem with the release, check that:" >&2
+echo "  * this JDK's major version matches the one in .buildspec" >&2
+echo "  * the working tree is at the release tag, not ahead of it" >&2
+echo "  * $version is actually published to $repo" >&2
+echo "target/*.buildcompare lists which artifacts differed." >&2
+exit "$status"

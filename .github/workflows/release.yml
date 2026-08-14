@@ -1,0 +1,134 @@
+name: Release
+
+# The tag is created by merging the release pull request that release-please
+# maintains; this workflow only reacts to it.
+on:
+  push:
+    # This project's tags carry no "v" prefix - 1.0.0, 1.0.1 - and
+    # release-please is configured to keep it that way.
+    tags: ["[0-9]*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and sign without deploying"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Publish to Clojars
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4.2.4
+        with:
+          version: 2026.8.3
+          cache: true
+
+      # A release that does not pass its own tests is not a release.
+      - name: Verify
+        run: mise run verify
+
+      - name: Check the tag matches the project version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(mvn -q -DforceStdout help:evaluate -Dexpression=project.version)"
+          if [ "$tag" != "$version" ]; then
+            echo "tag $tag does not match project version $version" >&2
+            exit 1
+          fi
+
+      # Signing runs on a dry run too: it is the part most likely to be
+      # misconfigured, and a rehearsal that skips it proves nothing.
+      - name: Import the signing key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --import
+
+      # An expired signing key fails the build here with a clear message, rather
+      # than deep inside gpg two years from now.
+      - name: Check the signing key
+        run: mise run release:check-key --days 60
+
+      - name: Sign the artifacts
+        if: ${{ inputs.dry_run }}
+        env:
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          mvn -B --no-transfer-progress -P release -DskipTests -Dspotbugs.skip=true verify
+          ls -1 target/*.asc
+          echo "dry run: signed but not deployed"
+
+      - name: Deploy
+        if: ${{ !inputs.dry_run }}
+        env:
+          CLOJARS_USERNAME: ${{ secrets.CLOJARS_USERNAME }}
+          CLOJARS_DEPLOY_TOKEN: ${{ secrets.CLOJARS_DEPLOY_TOKEN }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          mvn -B --no-transfer-progress -P release \
+            -DskipTests -Dspotbugs.skip=true \
+            --settings .github/maven-settings.xml deploy
+
+      - name: Attach artifacts to the run
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-artifacts
+          path: |
+            target/*.jar
+            target/*.asc
+            target/bom.json
+            target/*.buildinfo
+          if-no-files-found: warn
+
+      # release-please has already created the GitHub Release with the generated
+      # notes; this puts the built artifacts and the SBOM on it.
+      - name: Attach artifacts to the GitHub release
+        if: ${{ !inputs.dry_run && startsWith(github.ref, 'refs/tags/') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release upload "$GITHUB_REF_NAME" \
+            target/*.jar target/bom.json target/*.buildinfo --clobber
+          if compgen -G 'target/*.asc' > /dev/null; then
+            gh release upload "$GITHUB_REF_NAME" target/*.asc --clobber
+          fi
+
+      # A reproducibility claim nobody can act on is decoration, so the notes carry
+      # the command that checks it. Appended to what release-please generated
+      # rather than replacing it.
+      - name: Note how to verify the build
+        if: ${{ !inputs.dry_run && startsWith(github.ref, 'refs/tags/') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          notes="$(gh release view "$GITHUB_REF_NAME" --json body -q .body)"
+          {
+            printf '%s\n\n' "$notes"
+            printf -- '---\n\n'
+            printf '### Reproducible build\n\n'
+            printf 'These artifacts are byte-for-byte reproducible on any JDK %s, ' \
+                   "$(sed -n 's/^jdk=//p' .buildspec)"
+            printf 'independent of OS, architecture, JDK vendor, locale and timezone:\n\n'
+            printf '```sh\n'
+            printf 'git checkout %s\n' "$GITHUB_REF_NAME"
+            printf 'mise install\n'
+            printf 'mise run verify:reproducible\n'
+            printf '```\n\n'
+            printf 'That rebuilds from source and compares against what was published to '
+            printf 'Clojars. The attached `.buildinfo` records the toolchain and a checksum '
+            printf 'per artifact; `.buildspec` is the same recipe in the format used by '
+            printf '[Reproducible Central](https://github.com/jvm-repo-rebuild/reproducible-central).\n'
+          } | gh release edit "$GITHUB_REF_NAME" --notes-file -

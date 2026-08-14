@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Used only by the release workflow. Clojars authenticates with the account
+     username and a deploy token in place of the password - never the account
+     password, which a token cannot substitute for logging in. -->
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0">
+  <servers>
+    <server>
+      <id>clojars</id>
+      <username>${env.CLOJARS_USERNAME}</username>
+      <password>${env.CLOJARS_DEPLOY_TOKEN}</password>
+    </server>
+  </servers>
+</settings>

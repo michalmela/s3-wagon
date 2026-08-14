@@ -1,0 +1,35 @@
+# Rebuild recipe for https://reproducible-builds.org/docs/jvm/ - the format
+# consumed by https://github.com/jvm-repo-rebuild/reproducible-central.
+#
+# It says: check out this tag, run this command on this JDK, and you should get
+# byte-for-byte the artifacts that were published. Verify a release with:
+#
+#   mise run verify:reproducible
+#
+# The version line is maintained by release-please; everything else is by hand.
+
+groupId=io.github.michalmela
+artifactId=s3-wagon
+display=${groupId}:${artifactId}
+version=1.0.2 # x-release-please-version
+
+# This project publishes to Clojars rather than Maven Central, so the reference
+# binaries are not where a rebuilder would look by default.
+referenceRepo=https://repo.clojars.org/
+
+gitRepo=https://github.com/michalmela/s3-wagon.git
+# Tags carry no "v" prefix; release-please is configured to keep it that way.
+gitTag=${version}
+
+tool=mvn
+# The build is reproducible on any JDK 26; it is not reproducible across major
+# versions, because javac names synthetic members differently between them.
+# mise.toml pins the exact JDK this project builds with.
+jdk=26
+newline=lf
+
+# Static analysis and coverage do not touch the artifacts, so a rebuild can skip
+# them; tests are skipped for the same reason. Anything affecting the output
+# stays in.
+command="mvn clean verify -DskipTests -Dspotbugs.skip=true -Djacoco.skip=true"
+buildinfo=target/${artifactId}-${version}.buildinfo

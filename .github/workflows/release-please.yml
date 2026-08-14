@@ -1,0 +1,29 @@
+name: Release please
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release-please:
+    name: Prepare the release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      # Keeps a release pull request open with the version bump and the
+      # changelog entries generated from the conventional commits. Merging it
+      # tags the release, which is what the Release workflow reacts to.
+      #
+      # Add anything a generated changelog cannot know - migration steps,
+      # behaviour changes worth calling out - to that pull request before
+      # merging it. That is the moment for editorial content, not afterwards.
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
