@@ -127,13 +127,24 @@ Tags carry no `v` prefix, matching the existing `1.0.0` and `1.0.1`.
 
 ### The first release after this branch lands
 
-Nothing special: merge, and release-please opens a release pull request proposing 1.1.0, because the
-branch carries `feat:` commits and the last released version is 1.0.2. Paste the migration notes for
-this release from [UPGRADING.md](UPGRADING.md) into that pull request if you want them echoed in the
-changelog, then merge it. That tags 1.1.0, publishes to Clojars, and attaches the artifacts.
+Two pull requests, in order. Because `master` still carries the released `1.0.2` in its pom rather
+than a snapshot, release-please proposes the snapshot bump first — `1.0.3-SNAPSHOT`, no changelog,
+nothing to review. Merge it. Only then does it propose 1.1.0, because the branch carries `feat:`
+commits and the last released version is 1.0.2. Paste the migration notes for this release from
+[UPGRADING.md](UPGRADING.md) into *that* pull request if you want them echoed in the changelog, then
+merge it. That tags 1.1.0, publishes to Clojars, and attaches the artifacts.
+
+After this, the two alternate: a release pull request, then a snapshot bump, then the next release.
 
 The version in `pom.xml` and the two version references in `README.md` are all updated by
 release-please, so none of them should be edited by hand.
+
+Between releases the pom carries a `-SNAPSHOT`, and release-please opens a second pull request after
+each release to put it there — that is the Maven convention, and it stops a local `mvn install` from
+overwriting a real release in `~/.m2`. The README must not follow the pom down to a version nobody
+can resolve, so its two references use the `x-release-please-released-version` marker rather than
+the usual `x-release-please-version`: the java strategies apply that one only when releasing a real
+version, and skip it for the snapshot bump. Use it for anything user-facing that names a version.
 
 To see what it would propose before merging anything:
 
@@ -221,6 +232,11 @@ mise run lint          # actionlint: syntax and expressions, instant
 mise run ci:dryrun     # act: does every action reference resolve to something runnable?
 mise run ci:local -- -j Verify   # act: actually run a job on Linux
 ```
+
+`actionlint` shells out to `shellcheck` to check the `run:` scripts, and *silently skips that half
+of its job* when shellcheck is not on the PATH. That is why shellcheck is pinned in `mise.toml`
+rather than left to whatever the machine happens to have: without it a workflow can lint clean
+locally and fail on a runner, which is exactly how a broken release step reached `master`.
 
 The middle one exists because of a real failure: `actionlint` passed a workflow whose action
 reference pointed at a repository root with no `runs:` section, and it only broke once GitHub tried
