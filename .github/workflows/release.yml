@@ -114,21 +114,31 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          jdk="$(sed -n 's/^jdk=//p' .buildspec)"
           notes="$(gh release view "$GITHUB_REF_NAME" --json body -q .body)"
           {
             printf '%s\n\n' "$notes"
-            printf -- '---\n\n'
-            printf '### Reproducible build\n\n'
-            printf 'These artifacts are byte-for-byte reproducible on any JDK %s, ' \
-                   "$(sed -n 's/^jdk=//p' .buildspec)"
-            printf 'independent of OS, architecture, JDK vendor, locale and timezone:\n\n'
-            printf '```sh\n'
-            printf 'git checkout %s\n' "$GITHUB_REF_NAME"
-            printf 'mise install\n'
-            printf 'mise run verify:reproducible\n'
-            printf '```\n\n'
-            printf 'That rebuilds from source and compares against what was published to '
-            printf 'Clojars. The attached `.buildinfo` records the toolchain and a checksum '
-            printf 'per artifact; `.buildspec` is the same recipe in the format used by '
-            printf '[Reproducible Central](https://github.com/jvm-repo-rebuild/reproducible-central).\n'
+            # A quoted heredoc: the body is markdown, full of backticks that must
+            # survive as backticks, so nothing in here may be expanded by the shell.
+            # The two values it needs are patched in afterwards instead.
+            sed -e "s|@TAG@|$GITHUB_REF_NAME|g" -e "s|@JDK@|$jdk|g" <<'MARKDOWN'
+          ---
+
+          ### Reproducible build
+
+          These artifacts are byte-for-byte reproducible on any JDK @JDK@, independent of
+          operating system, architecture, JDK vendor, locale and timezone:
+
+          ```sh
+          git checkout @TAG@
+          mise install
+          mise run verify:reproducible
+          ```
+
+          That rebuilds from source and compares against what was published to Clojars,
+          failing if a single byte differs. The attached `.buildinfo` records the toolchain
+          and a checksum per artifact; `.buildspec` is the same recipe in the format
+          [Reproducible Central](https://github.com/jvm-repo-rebuild/reproducible-central)
+          consumes.
+          MARKDOWN
           } | gh release edit "$GITHUB_REF_NAME" --notes-file -
