@@ -35,8 +35,32 @@ you would treat an unexplained change to a pinned action SHA.
 mise run pre-commit
 ```
 
-That runs the linters and the unit tests. `mise run lint` on its own checks the GitHub Actions
-workflows with actionlint, which CI runs too — before this they were only ever linted by hand.
+That runs everything CI would reject the change for, short of the integration tests — the linters,
+the formatter, the unit tests, SpotBugs, javadoc and the SBOM — in about fifteen seconds. The
+integration tests are left out on purpose: they need Docker, and a pre-commit hook that fails when
+Docker is not running is a pre-commit hook people turn off. `mise run lint` on its own is the fast
+subset: formatting, actionlint and the pinned-action check.
+
+Formatting is enforced, so a badly formatted change fails the build rather than attracting a review
+comment. To fix it:
+
+```sh
+mise run format
+```
+
+The formatter is Eclipse's, driven by [spotless](https://github.com/diffplug/spotless) and
+configured in [.eclipse-format.prefs](.eclipse-format.prefs). Two things about that choice are worth
+knowing before changing it:
+
+* **Not google-java-format or palantir-java-format.** Both drive javac internals and both fail
+  outright on the JDK this project pins, with a `NoSuchMethodError` on
+  `com.sun.tools.javac.util.Log$DeferredDiagnosticHandler`. Eclipse's formatter brings its own
+  parser and does not care which JDK it runs on. If they ever catch up, the tradeoff is worth
+  revisiting — they need no configuration file.
+* **The settings were fitted to the code, not the other way round.** Adopting Eclipse's defaults
+  would have rewritten about 70% of the project, mostly by reflowing every javadoc paragraph to
+  80 columns. Tuned to 120 columns, four-space indents and comments left alone, adopting it moved
+  fifteen lines — all of them wrapping something that was over the limit already.
 
 If you would rather not remember, wire it into git:
 

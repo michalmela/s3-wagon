@@ -62,6 +62,26 @@ import java.util.function.Function;
 
 import static software.amazon.awssdk.utils.StringUtils.isNotBlank;
 
+/**
+ * A Maven wagon that reads and writes artifacts in Amazon S3, or in any store reachable over the
+ * same API. Repository URLs take the form {@code s3p://<bucket>/<prefix>}, and {@code s3://} works
+ * too; the trailing slash on the prefix is optional.
+ *
+ * <p>Under Maven the settings below are configured per server in {@code settings.xml}. Leiningen
+ * has no way to pass wagon configuration, so each one also falls back to a system property and
+ * then an environment variable, in that order - {@code region} reads {@code s3wagon.region} and
+ * then {@code S3WAGON_REGION}. They take strings because that is how they arrive from all three.
+ * Everything is optional: a setting that is left out is not sent at all, which leaves the bucket's
+ * own defaults in charge.
+ *
+ * <p>Credentials come from a username and password in {@code settings.xml} when one is present,
+ * then from {@link #setProfile(String) profile}, and otherwise from the AWS SDK's default provider
+ * chain - which is what lets {@code aws sso login} work without exporting anything. They are never
+ * logged, though {@code mvn -X} reports everything else the wagon resolved.
+ *
+ * <p>Instances are created per lookup, so one is not shared between repositories and none of this
+ * needs to be thread-safe across connections.
+ */
 public final class S3Wagon extends AbstractWagon implements StreamingWagon {
 
     /** S3 accepts at most 10000 parts in a multipart upload. */
@@ -149,6 +169,11 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
     private ObjectCannedACL acl;
     private RequestChecksumCalculation checksumCalculation;
 
+    /**
+     * Creates a wagon that builds its own S3 client. This is the constructor Maven and Leiningen
+     * call; the client itself is not built until the connection is opened, so the settings above
+     * can be applied first.
+     */
     public S3Wagon() {
         this(null);
     }
@@ -202,62 +227,140 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
         return profile() != null ? "profile " + profile() : "default provider chain";
     }
 
+    /**
+     * Region to use when the default provider chain cannot work one out.
+     *
+     * @param region region id, such as {@code eu-central-1}
+     */
     public void setRegion(String region) {
         this.region = region;
     }
 
+    /**
+     * Absolute URL of an S3-compatible store to use instead of AWS.
+     *
+     * @param endpoint endpoint URL, such as {@code https://minio.example.com}
+     */
     public void setEndpoint(String endpoint) {
         this.endpoint = endpoint;
     }
 
+    /**
+     * Addresses buckets as {@code endpoint/bucket} rather than {@code bucket.endpoint}, which is
+     * what most S3-compatible stores expect.
+     *
+     * @param pathStyleAccess whether to use path-style addressing
+     */
     public void setPathStyleAccess(boolean pathStyleAccess) {
         this.pathStyleAccess = pathStyleAccess;
     }
 
+    /**
+     * Server-side encryption to apply on upload.
+     *
+     * @param serverSideEncryption encryption to request, such as {@code AES256} or {@code aws:kms}
+     */
     public void setServerSideEncryption(String serverSideEncryption) {
         this.serverSideEncryption = serverSideEncryption;
     }
 
+    /**
+     * KMS key to encrypt with, used when the encryption is {@code aws:kms}.
+     *
+     * @param sseKmsKeyId key ARN or id
+     */
     public void setSseKmsKeyId(String sseKmsKeyId) {
         this.sseKmsKeyId = sseKmsKeyId;
     }
 
+    /**
+     * Canned ACL to apply on upload.
+     *
+     * @param cannedAcl ACL name, such as {@code bucket-owner-full-control}
+     */
     public void setCannedAcl(String cannedAcl) {
         this.cannedAcl = cannedAcl;
     }
 
+    /**
+     * When the SDK attaches a checksum to an upload. Some S3-compatible stores reject the
+     * trailer the default adds; {@code when_required} keeps it off unless the operation needs it.
+     *
+     * @param requestChecksumCalculation {@code when_supported} or {@code when_required}
+     */
     public void setRequestChecksumCalculation(String requestChecksumCalculation) {
         this.requestChecksumCalculation = requestChecksumCalculation;
     }
 
+    /**
+     * Artifacts larger than this many bytes are uploaded in parts rather than in one request.
+     *
+     * @param multipartThreshold threshold in bytes
+     */
     public void setMultipartThreshold(String multipartThreshold) {
         this.multipartThreshold = multipartThreshold;
     }
 
+    /**
+     * Size of each uploaded part, never taken below S3's own 5MB minimum.
+     *
+     * @param multipartPartSize part size in bytes
+     */
     public void setMultipartPartSize(String multipartPartSize) {
         this.multipartPartSize = multipartPartSize;
     }
 
+    /**
+     * Session token accompanying temporary credentials.
+     *
+     * @param sessionToken session token
+     */
     public void setSessionToken(String sessionToken) {
         this.sessionToken = sessionToken;
     }
 
+    /**
+     * Named profile to take credentials from, including profiles that assume a role.
+     *
+     * @param profile profile name from the AWS configuration files
+     */
     public void setProfile(String profile) {
         this.profile = profile;
     }
 
+    /**
+     * How many parts to upload at once, clamped to 1..16. Parallelism only pays off against
+     * an endpoint with latency to hide; see BENCHMARKS.md.
+     *
+     * @param multipartConcurrency number of parts to upload concurrently
+     */
     public void setMultipartConcurrency(String multipartConcurrency) {
         this.multipartConcurrency = multipartConcurrency;
     }
 
+    /**
+     * Storage class for uploaded objects.
+     *
+     * @param storageClass storage class, such as {@code STANDARD_IA}
+     */
     public void setStorageClass(String storageClass) {
         this.storageClass = storageClass;
     }
 
+    /**
+     * Tags to apply on upload, as a URL-encoded query string.
+     *
+     * @param objectTags tags, such as {@code team=platform&tier=build}
+     */
     public void setObjectTags(String objectTags) {
         this.objectTags = objectTags;
     }
 
+    /**
+     * Retry attempts after the first. The SDK's own default applies when this is unset.
+     *
+     * @param retries number of retries
+     */
     public void setRetries(String retries) {
         this.retries = retries;
     }
@@ -269,15 +372,27 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
      * only count bytes - which is what Maven's progress reporting does - are unaffected, but a
      * listener that digests the stream as it arrives, such as Wagon's own {@code ChecksumObserver},
      * would produce a wrong result. That is why this is off unless asked for.
+     *
+     * @param downloadConcurrency ranged GETs to run at once, or 1 to download in a single request
      */
     public void setDownloadConcurrency(String downloadConcurrency) {
         this.downloadConcurrency = downloadConcurrency;
     }
 
+    /**
+     * Bytes fetched per ranged GET when a download is split.
+     *
+     * @param downloadChunkSize chunk size in bytes
+     */
     public void setDownloadChunkSize(String downloadChunkSize) {
         this.downloadChunkSize = downloadChunkSize;
     }
 
+    /**
+     * Downloads larger than this many bytes may be split into ranged GETs.
+     *
+     * @param downloadThreshold threshold in bytes
+     */
     public void setDownloadThreshold(String downloadThreshold) {
         this.downloadThreshold = downloadThreshold;
     }
@@ -384,7 +499,8 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
             downloadChunkSize();
             downloadThreshold();
         } catch (NumberFormatException e) {
-            throw new ConnectionException("multipartThreshold, multipartPartSize, multipartConcurrency and retries must all be numbers", e);
+            throw new ConnectionException(
+                    "multipartThreshold, multipartPartSize, multipartConcurrency and retries must all be numbers", e);
         }
     }
 
@@ -481,7 +597,8 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
     }
 
     @Override
-    public boolean getIfNewer(String resourceName, File destination, long timestamp) throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
+    public boolean getIfNewer(String resourceName, File destination, long timestamp)
+            throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
         if (timestamp == 0 || isNewer(resourceName, timestamp)) {
             get(resourceName, destination);
             return true;
@@ -490,7 +607,8 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
     }
 
     @Override
-    public void get(String resourceName, File destination) throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
+    public void get(String resourceName, File destination)
+            throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
         Resource resource = new Resource(resourceName);
         this.fireGetInitiated(resource, destination);
         download(resourceName, resource, destination, null);
@@ -565,7 +683,8 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
     }
 
     @Override
-    public void put(File source, String destination) throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
+    public void put(File source, String destination)
+            throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
         Resource resource = new Resource(destination);
         resource.setContentLength(source.length());
         resource.setLastModified(source.lastModified());
@@ -849,8 +968,8 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
             List<Future<CompletedPart>> futures = new ArrayList<>();
             for (int partNumber = 1; partNumber <= partCount; partNumber++) {
                 int part = partNumber;
-                futures.add(pool.submit(() ->
-                        uploadSinglePart(source, destination, resource, uploadId, partSize, part, source.length())));
+                futures.add(pool.submit(() -> uploadSinglePart(source, destination, resource, uploadId, partSize, part,
+                        source.length())));
             }
             List<CompletedPart> parts = new ArrayList<>();
             for (Future<CompletedPart> future : futures) {
@@ -1107,7 +1226,8 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
         this.baseDirectory = null;
     }
 
-    private boolean isNewer(String resourceName, long timestamp) throws ResourceDoesNotExistException, AuthorizationException, TransferFailedException {
+    private boolean isNewer(String resourceName, long timestamp)
+            throws ResourceDoesNotExistException, AuthorizationException, TransferFailedException {
         try {
             HeadObjectResponse headObject = headObject(resourceName);
             return headObject.lastModified().toEpochMilli() > timestamp;
@@ -1387,8 +1507,8 @@ public final class S3Wagon extends AbstractWagon implements StreamingWagon {
         }
         String prefix = destinationDirectory == null || destinationDirectory.isEmpty()
                 || ".".equals(destinationDirectory)
-                ? ""
-                : destinationDirectory.endsWith("/") ? destinationDirectory : destinationDirectory + "/";
+                        ? ""
+                        : destinationDirectory.endsWith("/") ? destinationDirectory : destinationDirectory + "/";
         putDirectoryContents(sourceDirectory, prefix);
     }
 

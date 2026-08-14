@@ -109,7 +109,7 @@ class S3WagonParallelDownloadTest {
             @Override
             public synchronized software.amazon.awssdk.core.ResponseInputStream<
                     software.amazon.awssdk.services.s3.model.GetObjectResponse> getObject(
-                    software.amazon.awssdk.services.s3.model.GetObjectRequest request) {
+                            software.amazon.awssdk.services.s3.model.GetObjectRequest request) {
                 if (request.range() != null && request.range().contains("=2")) {
                     throw software.amazon.awssdk.core.exception.SdkClientException.create("range failed");
                 }

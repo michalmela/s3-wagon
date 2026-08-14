@@ -53,7 +53,8 @@ public final class Java8SmokeCheck {
             wagon.get("g/a/1.0/a-1.0.jar", destination);
             byte[] downloaded = readFully(destination);
             if (!Arrays.equals(PAYLOAD, downloaded)) {
-                throw new IllegalStateException("downloaded " + downloaded.length + " bytes, expected " + PAYLOAD.length);
+                throw new IllegalStateException(
+                        "downloaded " + downloaded.length + " bytes, expected " + PAYLOAD.length);
             }
 
             File source = File.createTempFile("java8-upload", ".jar");

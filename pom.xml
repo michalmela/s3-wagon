@@ -37,10 +37,12 @@
         <maven-gpg-plugin.version>3.2.8</maven-gpg-plugin.version>
         <cyclonedx-maven-plugin.version>2.9.3</cyclonedx-maven-plugin.version>
         <maven-artifact-plugin.version>3.6.1</maven-artifact-plugin.version>
+        <spotless-maven-plugin.version>2.44.5</spotless-maven-plugin.version>
         <!-- Fixed timestamp makes the jar byte-for-byte reproducible. -->
         <project.build.outputTimestamp>2026-08-11T00:00:00Z</project.build.outputTimestamp>
         <testcontainers.version>1.21.4</testcontainers.version>
         <commons-compress.version>1.28.0</commons-compress.version>
+        <plexus-utils.version>4.0.3</plexus-utils.version>
         <minio.image>minio/minio:RELEASE.2025-09-07T16-13-09Z</minio.image>
     </properties>
 
@@ -62,6 +64,18 @@
                 <groupId>org.apache.commons</groupId>
                 <artifactId>commons-compress</artifactId>
                 <version>${commons-compress.version}</version>
+            </dependency>
+            <!-- wagon-provider-api 3.5.3 - which is its latest release - brings plexus-utils
+                 3.3.1, carrying a directory traversal in extractFile (CVE-2025-67030). Provided
+                 scope, so Maven's own copy is what actually runs and nothing here reaches a
+                 consumer; this raises what the project compiles and tests against, and stops the
+                 advisory being reported against a repository that cannot ship it. 4.0.3 is both
+                 the latest and what Maven 4 itself puts on the classpath; Maven 3.9.16 ships
+                 3.6.1, which is also past the fix, and the end-to-end job exercises both. -->
+            <dependency>
+                <groupId>org.codehaus.plexus</groupId>
+                <artifactId>plexus-utils</artifactId>
+                <version>${plexus-utils.version}</version>
             </dependency>
             <dependency>
                 <groupId>org.testcontainers</groupId>
@@ -262,6 +276,14 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-javadoc-plugin</artifactId>
                 <version>${maven-javadoc-plugin.version}</version>
+                <configuration>
+                    <!-- Javadoc warnings are invisible in a green build, so twenty of them
+                         accumulated before anyone looked. The published API here is small enough
+                         that keeping it fully documented is cheap. If a JDK upgrade introduces a
+                         new doclint check and this starts failing on something not worth fixing,
+                         this is one line to drop. -->
+                    <failOnWarnings>true</failOnWarnings>
+                </configuration>
                 <executions>
                     <execution>
                         <id>attach-javadocs</id>
@@ -331,6 +353,57 @@
                         <phase>verify</phase>
                         <goals>
                             <goal>buildinfo</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>com.diffplug.spotless</groupId>
+                <artifactId>spotless-maven-plugin</artifactId>
+                <version>${spotless-maven-plugin.version}</version>
+                <configuration>
+                    <java>
+                        <!-- Wider than the default source roots: this project also keeps benchmark,
+                             fuzz and runtime-check sources under src/, and they are code too. -->
+                        <includes>
+                            <include>src/*/java*/**/*.java</include>
+                        </includes>
+                        <eclipse>
+                            <file>${project.basedir}/.eclipse-format.prefs</file>
+                        </eclipse>
+                        <removeUnusedImports>
+                            <!-- The default engine is google-java-format, which cannot run on this
+                                 project's JDK; this one parses with JavaParser instead. -->
+                            <engine>cleanthat-javaparser-unnecessaryimport</engine>
+                        </removeUnusedImports>
+                        <trimTrailingWhitespace/>
+                        <endWithNewline/>
+                    </java>
+                    <formats>
+                        <!-- Everything else that is text under version control: no opinion about
+                             its content, only that it does not carry trailing whitespace and does
+                             end with a newline. -->
+                        <format>
+                            <includes>
+                                <include>*.md</include>
+                                <include>.github/**/*.yml</include>
+                                <include>mise-tasks/**</include>
+                                <include>mise.toml</include>
+                                <include>.buildspec</include>
+                            </includes>
+                            <trimTrailingWhitespace/>
+                            <endWithNewline/>
+                        </format>
+                    </formats>
+                </configuration>
+                <executions>
+                    <execution>
+                        <!-- Bound to verify rather than validate so an ordinary mvn test stays
+                             fast; CI runs verify, so nothing unformatted reaches master. -->
+                        <id>check</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>check</goal>
                         </goals>
                     </execution>
                 </executions>
