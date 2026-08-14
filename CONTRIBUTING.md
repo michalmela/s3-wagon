@@ -222,6 +222,11 @@ mise run ci:dryrun     # act: does every action reference resolve to something r
 mise run ci:local -- -j Verify   # act: actually run a job on Linux
 ```
 
+`actionlint` shells out to `shellcheck` to check the `run:` scripts, and *silently skips that half
+of its job* when shellcheck is not on the PATH. That is why shellcheck is pinned in `mise.toml`
+rather than left to whatever the machine happens to have: without it a workflow can lint clean
+locally and fail on a runner, which is exactly how a broken release step reached `master`.
+
 The middle one exists because of a real failure: `actionlint` passed a workflow whose action
 reference pointed at a repository root with no `runs:` section, and it only broke once GitHub tried
 to run it. A dry run catches that in milliseconds.
