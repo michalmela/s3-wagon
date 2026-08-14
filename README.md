@@ -4,6 +4,8 @@
 [![CI](https://github.com/michalmela/s3-wagon/actions/workflows/ci.yml/badge.svg)](https://github.com/michalmela/s3-wagon/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/michalmela/s3-wagon)](LICENSE)
 ![Java 8+](https://img.shields.io/badge/java-8%2B-blue)
+[![OpenSSF Scorecard](https://img.shields.io/ossf-scorecard/github.com/michalmela/s3-wagon?label=openssf%20scorecard)](https://scorecard.dev/viewer/?uri=github.com/michalmela/s3-wagon)
+[![CodeQL](https://github.com/michalmela/s3-wagon/actions/workflows/dynamic/github-code-scanning/codeql/badge.svg)](https://github.com/michalmela/s3-wagon/security/code-scanning)
 
 A drop-in replacement for https://github.com/s3-wagon-private/s3-wagon-private but:
 
