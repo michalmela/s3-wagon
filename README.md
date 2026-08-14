@@ -21,7 +21,7 @@ trailing slash on the prefix is optional.
 In `project.clj`:
 
 ```clj
-:plugins [[io.github.michalmela/s3-wagon "1.0.2"]] ;; x-release-please-version
+:plugins [[io.github.michalmela/s3-wagon "1.0.2"]] ;; x-release-please-released-version
 
 ;;; option 1: use default credentials provider
 ; cf. https://docs.aws.amazon.com/sdk-for-java/latest/developer-guide/credentials.html#credentials-chain
@@ -63,7 +63,7 @@ In `pom.xml`:
         <extension>
             <groupId>io.github.michalmela</groupId>
             <artifactId>s3-wagon</artifactId>
-            <version>1.0.2</version> <!-- x-release-please-version -->
+            <version>1.0.2</version> <!-- x-release-please-released-version -->
         </extension>
     </extensions>
 </build>
