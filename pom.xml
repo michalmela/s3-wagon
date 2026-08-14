@@ -43,6 +43,9 @@
         <testcontainers.version>1.21.4</testcontainers.version>
         <commons-compress.version>1.28.0</commons-compress.version>
         <plexus-utils.version>4.0.3</plexus-utils.version>
+        <!-- Must stay on the same 1.7.x line as the slf4j-api the AWS SDK brings:
+             a 2.x binding does not bind to a 1.7 API. Test scope only. -->
+        <slf4j.version>1.7.36</slf4j.version>
         <minio.image>minio/minio:RELEASE.2025-09-07T16-13-09Z</minio.image>
     </properties>
 
@@ -169,6 +172,18 @@
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- The wagon deliberately ships no SLF4J binding - whatever loads it, Maven or
+             Leiningen, brings its own - but with none on the test classpath SLF4J prints
+             "Failed to load class org.slf4j.impl.StaticLoggerBinder" and discards every log
+             line. This gives the tests a real binding, so the output is quiet by default
+             (see simplelogger.properties) and can be turned up when something needs
+             debugging. Test scope, so consumers are unaffected. -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-simple</artifactId>
+            <version>${slf4j.version}</version>
             <scope>test</scope>
         </dependency>
         <dependency>
