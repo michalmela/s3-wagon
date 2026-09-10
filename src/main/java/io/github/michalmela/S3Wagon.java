@@ -81,8 +81,13 @@ import static software.amazon.awssdk.utils.StringUtils.isNotBlank;
  *
  * <p>Instances are created per lookup, so one is not shared between repositories and none of this
  * needs to be thread-safe across connections.
+ *
+ * <p>Deliberately not {@code final}: the Plexus descriptor registers this one class under both
+ * {@code s3p} and {@code s3}, and Sisu binds only the first hint to the class itself, generating a
+ * subclass for every later one. A final class makes that subclass impossible, which left
+ * {@code s3://} failing to construct while {@code s3p://} worked.
  */
-public final class S3Wagon extends AbstractWagon implements StreamingWagon {
+public class S3Wagon extends AbstractWagon implements StreamingWagon {
 
     /** S3 accepts at most 10000 parts in a multipart upload. */
     private static final int MAX_PARTS = 10_000;
