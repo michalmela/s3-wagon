@@ -10,6 +10,8 @@ container="s3-wagon-maven-e2e-$$"
 port=19000
 bucket="e2e"
 version="$(mvn -q -DforceStdout help:evaluate -Dexpression=project.version)"
+minio_image="cgr.dev/chainguard/minio@sha256:a3c850913c8b3713abeca590afb93744f5bbcd34a60850648d9a553801d1faad"
+aws_cli_image="amazon/aws-cli@sha256:c3545440ffb85aac40c104d7fe5cb885d0ed26e91d95a433094a9dba9ddfacd6"
 
 cleanup() {
   docker rm -f "$container" >/dev/null 2>&1 || true
@@ -20,16 +22,19 @@ trap cleanup EXIT
 echo "==> starting MinIO"
 docker run -d --name "$container" -p "${port}:9000" \
   -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-  minio/minio:RELEASE.2025-09-07T16-13-09Z server /data >/dev/null
+  "$minio_image" server /data >/dev/null
 
 for _ in $(seq 1 60); do
   if curl -fsS "http://127.0.0.1:${port}/minio/health/live" >/dev/null 2>&1; then break; fi
   sleep 1
 done
+curl -fsS "http://127.0.0.1:${port}/minio/health/live" >/dev/null \
+  || { docker logs "$container"; echo "FAILED: MinIO did not become healthy"; exit 1; }
 
 echo "==> creating the bucket"
-docker run --rm --network host --entrypoint sh minio/mc:RELEASE.2025-08-13T08-35-41Z -c \
-  "mc alias set e2e http://127.0.0.1:${port} minioadmin minioadmin >/dev/null && mc mb --ignore-existing e2e/${bucket} >/dev/null"
+docker run --rm --network "container:${container}" \
+  -e AWS_ACCESS_KEY_ID=minioadmin -e AWS_SECRET_ACCESS_KEY=minioadmin -e AWS_DEFAULT_REGION=us-east-1 \
+  "$aws_cli_image" --endpoint-url http://127.0.0.1:9000 s3api create-bucket --bucket "$bucket" >/dev/null
 
 repo="$work/repo"
 mkdir -p "$repo"
@@ -92,8 +97,9 @@ mise x "maven@${maven}" -- mvn -B -q -f "$work/lib/pom.xml" \
   -s "$work/settings.xml" -Dmaven.repo.local="$repo" deploy
 
 echo "==> checking the artifact landed in S3"
-listing=$(docker run --rm --network host --entrypoint sh minio/mc:RELEASE.2025-08-13T08-35-41Z -c \
-  "mc alias set e2e http://127.0.0.1:${port} minioadmin minioadmin >/dev/null && mc ls --recursive e2e/${bucket}")
+listing=$(docker run --rm --network "container:${container}" \
+  -e AWS_ACCESS_KEY_ID=minioadmin -e AWS_SECRET_ACCESS_KEY=minioadmin -e AWS_DEFAULT_REGION=us-east-1 \
+  "$aws_cli_image" --endpoint-url http://127.0.0.1:9000 s3 ls --recursive "s3://${bucket}")
 echo "$listing"
 echo "$listing" | grep -q "releases/com/example/e2e/demo-lib/1.0.0/demo-lib-1.0.0.jar" \
   || { echo "FAILED: the jar is not at the expected key"; exit 1; }

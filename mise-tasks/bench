@@ -17,6 +17,8 @@ network="s3-wagon-bench-net-$$"
 port=19100
 proxy_port=19101
 api_port=19102
+minio_image="cgr.dev/chainguard/minio@sha256:a3c850913c8b3713abeca590afb93744f5bbcd34a60850648d9a553801d1faad"
+aws_cli_image="amazon/aws-cli@sha256:c3545440ffb85aac40c104d7fe5cb885d0ed26e91d95a433094a9dba9ddfacd6"
 
 cleanup() {
   docker rm -f "$container" "$proxy" >/dev/null 2>&1 || true
@@ -28,11 +30,13 @@ echo "==> starting MinIO"
 docker network create "$network" >/dev/null
 docker run -d --name "$container" --network "$network" -p "${port}:9000" \
   -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-  minio/minio:RELEASE.2025-09-07T16-13-09Z server /data >/dev/null
+  "$minio_image" server /data >/dev/null
 for _ in $(seq 1 60); do
   curl -fsS "http://127.0.0.1:${port}/minio/health/live" >/dev/null 2>&1 && break
   sleep 1
 done
+curl -fsS "http://127.0.0.1:${port}/minio/health/live" >/dev/null \
+  || { docker logs "$container"; echo "FAILED: MinIO did not become healthy"; exit 1; }
 
 if [ "$latency" -gt 0 ]; then
   # Loopback has no round-trip time for concurrency to hide, which would make a
@@ -54,8 +58,9 @@ if [ "$latency" -gt 0 ]; then
 else
   export BENCH_ENDPOINT="http://127.0.0.1:${port}"
 fi
-docker run --rm --network "$network" --entrypoint sh minio/mc:RELEASE.2025-08-13T08-35-41Z -c \
-  "mc alias set bench http://${container}:9000 minioadmin minioadmin >/dev/null && mc mb --ignore-existing bench/bench >/dev/null"
+docker run --rm --network "$network" \
+  -e AWS_ACCESS_KEY_ID=minioadmin -e AWS_SECRET_ACCESS_KEY=minioadmin -e AWS_DEFAULT_REGION=us-east-1 \
+  "$aws_cli_image" --endpoint-url "http://${container}:9000" s3api create-bucket --bucket bench >/dev/null
 
 echo "==> compiling the harness"
 mvn -q dependency:build-classpath -Dmdep.outputFile=target/runtime-classpath.txt -Dmdep.includeScope=runtime

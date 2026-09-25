@@ -46,7 +46,9 @@
         <!-- Must stay on the same 1.7.x line as the slf4j-api the AWS SDK brings:
              a 2.x binding does not bind to a 1.7 API. Test scope only. -->
         <slf4j.version>1.7.36</slf4j.version>
-        <minio.image>minio/minio:RELEASE.2025-09-07T16-13-09Z</minio.image>
+        <!-- MinIO stopped publishing community images after 2025-10. This multi-architecture,
+             digest-pinned Chainguard image remains pullable on both local Docker and CI runners. -->
+        <minio.image>cgr.dev/chainguard/minio@sha256:a3c850913c8b3713abeca590afb93744f5bbcd34a60850648d9a553801d1faad</minio.image>
     </properties>
 
     <dependencyManagement>
