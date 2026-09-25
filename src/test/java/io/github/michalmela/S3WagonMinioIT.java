@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.MinIOContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
+import org.testcontainers.utility.DockerImageName;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
@@ -40,10 +41,14 @@ class S3WagonMinioIT {
 
     private static final String BUCKET = "artifacts";
     private static final String RESOURCE = "g/a/1.0/a-1.0.jar";
+    private static final String MINIO_IMAGE = "cgr.dev/chainguard/minio@sha256:"
+            + "a3c850913c8b3713abeca590afb93744f5bbcd34a60850648d9a553801d1faad";
 
     @Container
     static final MinIOContainer MINIO = new MinIOContainer(
-            System.getProperty("minio.image", "minio/minio:RELEASE.2025-09-07T16-13-09Z"))
+            DockerImageName.parse(System.getProperty("minio.image", MINIO_IMAGE))
+                    // Testcontainers' MinIO helper requires this explicit compatibility declaration.
+                    .asCompatibleSubstituteFor("minio/minio"))
             // MinIO refuses SSE-S3 unless a KMS key is configured.
             .withEnv("MINIO_KMS_SECRET_KEY", "s3-wagon-test:bWluaW8tdGVzdC1rZXktMzItYnl0ZXMtZXhhY3RseSE=");
 
